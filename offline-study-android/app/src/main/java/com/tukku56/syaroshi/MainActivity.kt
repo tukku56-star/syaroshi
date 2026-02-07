@@ -39,9 +39,14 @@ class MainActivity : AppCompatActivity() {
             filePathCallback = null
         }
 
-    private val folderPickerLauncher =
-        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
-            onStudyFolderPicked(treeUri)
+    private val studyFolderPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val treeUri = result.data?.data
+            if (result.resultCode == RESULT_OK) {
+                onStudyFolderPicked(treeUri)
+            } else {
+                onStudyFolderPicked(null)
+            }
         }
 
     private val studyFilesPickerLauncher =
@@ -172,14 +177,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun showStudySourceChooser() {
         val options = arrayOf(
-            "端末フォルダを選択",
-            "Google Drive/ファイルを選択"
+            "フォルダ丸ごと選択（端末/Google Drive）",
+            "Google Driveのファイル選択（複数）"
         )
         AlertDialog.Builder(this)
             .setTitle("学習データの取り込み")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> folderPickerLauncher.launch(null)
+                    0 -> openStudyFolderPicker()
                     else -> openStudyFilesPicker()
                 }
             }
@@ -191,6 +196,25 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             .show()
+    }
+
+    private fun openStudyFolderPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+            putExtra(Intent.EXTRA_LOCAL_ONLY, false)
+        }
+
+        try {
+            studyFolderPickerLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            dispatchNativeFolderPayload(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "picker_unavailable")
+            )
+        }
     }
 
     private fun openStudyFilesPicker() {
@@ -355,7 +379,7 @@ class MainActivity : AppCompatActivity() {
             val (dir, prefix) = stack.removeLast()
             val children = try {
                 dir.listFiles()
-            } catch (_: SecurityException) {
+            } catch (_: Exception) {
                 emptyArray()
             }
 
@@ -390,6 +414,12 @@ class MainActivity : AppCompatActivity() {
         synchronized(nativeFileLock) {
             nativeFileMap.clear()
             nativeFileMap.putAll(nextNativeMap)
+        }
+
+        if (nextNativeMap.isEmpty()) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "no_supported_files")
         }
 
         return JSONObject()
@@ -473,7 +503,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun pickStudyFolder() {
             runOnUiThread {
-                showStudySourceChooser()
+                openStudyFolderPicker()
             }
         }
     }

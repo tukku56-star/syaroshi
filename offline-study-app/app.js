@@ -304,6 +304,14 @@ async function connectNativeFolder() {
         setStatus("フォルダ選択をキャンセルしました。", "warn");
         return;
       }
+      if (payload && payload.error === "no_supported_files") {
+        setStatus("選択フォルダ内にPDF/音声が見つかりません。Google Drive内の教材フォルダを選択してください。", "warn");
+        return;
+      }
+      if (payload && payload.error === "picker_unavailable") {
+        setStatus("フォルダ選択画面を開けませんでした。", "error");
+        return;
+      }
       setStatus("Androidフォルダ接続に失敗しました。", "error");
       return;
     }
