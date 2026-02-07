@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -f "$DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
+  echo "Gradle wrapper JAR not found. Please add gradle-wrapper.jar to gradle/wrapper."
+  exit 1
+fi
+CLASSPATH="$DIR/gradle/wrapper/gradle-wrapper.jar:$DIR/gradle/wrapper/gradle-wrapper-shared-8.5.jar:$DIR/gradle/wrapper/gradle-cli-8.5.jar"
+java -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"
