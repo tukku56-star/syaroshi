@@ -245,6 +245,12 @@ async function connectFolder() {
     return;
   }
 
+  if (isAndroidWebView()) {
+    setStatus("Androidアプリではフォルダ接続は未対応です。教材ファイル追加を使ってください。", "warn");
+    el.fileInput.click();
+    return;
+  }
+
   if (supportsDirectoryPicker()) {
     try {
       const handle = await window.showDirectoryPicker({ id: "sharoushi-study" });
@@ -1079,11 +1085,22 @@ function isIOSDevice() {
 }
 
 function supportsDirectoryPicker() {
+  if (isAndroidWebView()) {
+    return false;
+  }
   return typeof window.showDirectoryPicker === "function";
 }
 
 function supportsDirectoryUpload() {
+  if (isAndroidWebView()) {
+    return false;
+  }
   return Boolean(el.folderInput) && typeof el.folderInput.webkitdirectory !== "undefined";
+}
+
+function isAndroidWebView() {
+  const ua = navigator.userAgent || "";
+  return /Android/i.test(ua) && (/\bwv\b/i.test(ua) || /; wv\)/i.test(ua));
 }
 
 function supportsHandleStorage() {
