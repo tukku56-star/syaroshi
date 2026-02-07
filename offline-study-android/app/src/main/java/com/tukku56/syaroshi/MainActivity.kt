@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -14,6 +15,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.documentfile.provider.DocumentFile
 import org.json.JSONArray
@@ -40,6 +42,11 @@ class MainActivity : AppCompatActivity() {
     private val folderPickerLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
             onStudyFolderPicked(treeUri)
+        }
+
+    private val studyFilesPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            onStudyFilesPicked(result.resultCode, result.data)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -161,6 +168,174 @@ class MainActivity : AppCompatActivity() {
             val payload = buildStudyFolderPayload(treeUri)
             runOnUiThread { dispatchNativeFolderPayload(payload) }
         }.start()
+    }
+
+    private fun showStudySourceChooser() {
+        val options = arrayOf(
+            "端末フォルダを選択",
+            "Google Drive/ファイルを選択"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("学習データの取り込み")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> folderPickerLauncher.launch(null)
+                    else -> openStudyFilesPicker()
+                }
+            }
+            .setOnCancelListener {
+                dispatchNativeFolderPayload(
+                    JSONObject()
+                        .put("ok", false)
+                        .put("error", "canceled")
+                )
+            }
+            .show()
+    }
+
+    private fun openStudyFilesPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/pdf", "audio/*"))
+        }
+
+        try {
+            studyFilesPickerLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            dispatchNativeFolderPayload(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "picker_unavailable")
+            )
+        }
+    }
+
+    private fun onStudyFilesPicked(resultCode: Int, data: Intent?) {
+        if (resultCode != RESULT_OK) {
+            dispatchNativeFolderPayload(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "canceled")
+            )
+            return
+        }
+
+        val uris = mutableListOf<Uri>()
+        data?.data?.let { uris.add(it) }
+        val clipData = data?.clipData
+        if (clipData != null) {
+            for (i in 0 until clipData.itemCount) {
+                clipData.getItemAt(i)?.uri?.let { uris.add(it) }
+            }
+        }
+
+        if (uris.isEmpty()) {
+            dispatchNativeFolderPayload(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "empty")
+            )
+            return
+        }
+
+        val files = JSONArray()
+        val nextNativeMap = mutableMapOf<String, Uri>()
+        val usedPaths = mutableSetOf<String>()
+
+        for (uri in uris.distinct()) {
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: SecurityException) {
+                // Some providers do not allow persistable permissions.
+            }
+
+            val name = resolveDisplayName(uri)
+            val type = detectStudyType(name) ?: detectStudyTypeFromMime(contentResolver.getType(uri)) ?: continue
+            val prefix = if ((uri.authority ?: "").contains("google.android.apps.docs")) "GoogleDrive" else "追加"
+            val path = uniquePath("$prefix/$name", usedPaths)
+            usedPaths.add(path)
+
+            val id = UUID.randomUUID().toString()
+            nextNativeMap[id] = uri
+            files.put(
+                JSONObject()
+                    .put("path", path)
+                    .put("name", name)
+                    .put("type", type)
+                    .put("url", "$NATIVE_FILE_BASE/$id")
+            )
+        }
+
+        synchronized(nativeFileLock) {
+            nativeFileMap.clear()
+            nativeFileMap.putAll(nextNativeMap)
+        }
+
+        dispatchNativeFolderPayload(
+            JSONObject()
+                .put("ok", true)
+                .put("count", nextNativeMap.size)
+                .put("files", files)
+        )
+    }
+
+    private fun resolveDisplayName(uri: Uri): String {
+        try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index >= 0) {
+                        val value = cursor.getString(index)
+                        if (!value.isNullOrBlank()) {
+                            return value
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // Ignore and fallback.
+        }
+
+        val raw = uri.lastPathSegment ?: "file"
+        val tail = raw.substringAfterLast('/')
+        return if (tail.isBlank()) "file" else tail
+    }
+
+    private fun detectStudyTypeFromMime(mime: String?): String? {
+        if (mime == null) {
+            return null
+        }
+        if (mime.equals("application/pdf", ignoreCase = true)) {
+            return "pdf"
+        }
+        if (mime.lowercase(Locale.US).startsWith("audio/")) {
+            return "audio"
+        }
+        return null
+    }
+
+    private fun uniquePath(basePath: String, usedPaths: Set<String>): String {
+        if (!usedPaths.contains(basePath)) {
+            return basePath
+        }
+
+        val slash = basePath.lastIndexOf('/')
+        val directory = if (slash >= 0) basePath.substring(0, slash + 1) else ""
+        val filename = if (slash >= 0) basePath.substring(slash + 1) else basePath
+        val dot = filename.lastIndexOf('.')
+        val stem = if (dot > 0) filename.substring(0, dot) else filename
+        val ext = if (dot > 0) filename.substring(dot) else ""
+
+        var index = 2
+        while (true) {
+            val candidate = "$directory$stem ($index)$ext"
+            if (!usedPaths.contains(candidate)) {
+                return candidate
+            }
+            index += 1
+        }
     }
 
     private fun buildStudyFolderPayload(treeUri: Uri): JSONObject {
@@ -289,9 +464,16 @@ class MainActivity : AppCompatActivity() {
 
     private inner class AndroidBridge {
         @JavascriptInterface
+        fun pickStudySource() {
+            runOnUiThread {
+                showStudySourceChooser()
+            }
+        }
+
+        @JavascriptInterface
         fun pickStudyFolder() {
             runOnUiThread {
-                folderPickerLauncher.launch(null)
+                showStudySourceChooser()
             }
         }
     }

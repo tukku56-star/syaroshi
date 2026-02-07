@@ -367,7 +367,11 @@ function requestNativeFolderPick() {
     }, 180000);
 
     try {
-      window.AndroidBridge.pickStudyFolder();
+      if (typeof window.AndroidBridge.pickStudySource === "function") {
+        window.AndroidBridge.pickStudySource();
+      } else {
+        window.AndroidBridge.pickStudyFolder();
+      }
     } catch (error) {
       console.error(error);
       const done = pendingNativeFolderResolve;
@@ -1251,7 +1255,13 @@ function isIOSDevice() {
 }
 
 function supportsNativeFolderPicker() {
-  return Boolean(window.AndroidBridge && typeof window.AndroidBridge.pickStudyFolder === "function");
+  if (!window.AndroidBridge) {
+    return false;
+  }
+  return (
+    typeof window.AndroidBridge.pickStudySource === "function" ||
+    typeof window.AndroidBridge.pickStudyFolder === "function"
+  );
 }
 
 function supportsDirectoryPicker() {
