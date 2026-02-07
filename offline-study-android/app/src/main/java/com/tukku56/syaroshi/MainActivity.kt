@@ -503,7 +503,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun pickStudyFolder() {
             runOnUiThread {
-                openStudyFolderPicker()
+                showStudySourceChooser()
             }
         }
     }
