@@ -23,6 +23,7 @@ const MAX_RENDER_ITEMS = 350;
 const state = {
   library: [],
   libraryMap: new Map(),
+  nativeFileMap: new Map(),
   filtered: [],
   subjectCounts: new Map(),
   queue: [],
@@ -40,9 +41,13 @@ const state = {
   installGuideDismissed: false
 };
 
+let pendingNativeFolderResolve = null;
+let pendingNativeFolderTimer = null;
+
 const el = {};
 
 document.addEventListener("DOMContentLoaded", init);
+window.__onNativeFolderPicked = onNativeFolderPicked;
 
 async function init() {
   cacheElements();
@@ -52,9 +57,10 @@ async function init() {
   renderQueue();
   updateMemoAvailability();
 
-  if (!supportsDirectoryPicker() && !supportsDirectoryUpload()) {
+  const nativeFolderSupported = supportsNativeFolderPicker();
+  if (!nativeFolderSupported && !supportsDirectoryPicker() && !supportsDirectoryUpload()) {
     el.connectBtn.textContent = "教材ファイル追加";
-  } else if (!supportsDirectoryPicker()) {
+  } else if (!nativeFolderSupported && !supportsDirectoryPicker()) {
     el.connectBtn.textContent = "学習フォルダ選択";
   }
 
@@ -245,9 +251,8 @@ async function connectFolder() {
     return;
   }
 
-  if (isAndroidWebView()) {
-    setStatus("Androidアプリではフォルダ接続は未対応です。教材ファイル追加を使ってください。", "warn");
-    el.fileInput.click();
+  if (supportsNativeFolderPicker()) {
+    await connectNativeFolder();
     return;
   }
 
@@ -288,8 +293,125 @@ function addFiles() {
   el.fileInput.click();
 }
 
+async function connectNativeFolder() {
+  state.scanning = true;
+  setStatus("フォルダ選択を開いています...");
+
+  try {
+    const payload = await requestNativeFolderPick();
+    if (!payload || payload.ok !== true) {
+      if (payload && payload.error === "canceled") {
+        setStatus("フォルダ選択をキャンセルしました。", "warn");
+        return;
+      }
+      setStatus("Androidフォルダ接続に失敗しました。", "error");
+      return;
+    }
+
+    const files = Array.isArray(payload.files) ? payload.files : [];
+    const nextItems = [];
+    const nativeMap = new Map();
+    const usedPaths = new Set();
+
+    for (const row of files) {
+      const rawPath = String(row && row.path ? row.path : "").replace(/\\/g, "/").trim();
+      const type = row && (row.type === "pdf" || row.type === "audio")
+        ? row.type
+        : detectType(rawPath);
+      const url = String(row && row.url ? row.url : "").trim();
+      if (!rawPath || !type || !url) {
+        continue;
+      }
+
+      const uniquePath = createUniquePath(rawPath, usedPaths);
+      usedPaths.add(uniquePath);
+      nextItems.push(buildItem(uniquePath, type));
+      nativeMap.set(uniquePath, { url, type });
+    }
+
+    nextItems.sort(compareItems);
+    state.nativeFileMap = nativeMap;
+    state.filePool = null;
+    state.rootHandle = null;
+    await clearRootHandle();
+    el.refreshBtn.disabled = false;
+    setLibrary(nextItems, true);
+    setStatus(`フォルダ読み込み完了: ${nextItems.length}件`);
+  } catch (error) {
+    console.error(error);
+    setStatus("Androidフォルダ接続に失敗しました。", "error");
+  } finally {
+    state.scanning = false;
+  }
+}
+
+function requestNativeFolderPick() {
+  if (!supportsNativeFolderPicker()) {
+    return Promise.resolve({ ok: false, error: "not_supported" });
+  }
+
+  if (pendingNativeFolderResolve) {
+    return Promise.resolve({ ok: false, error: "busy" });
+  }
+
+  return new Promise((resolve) => {
+    pendingNativeFolderResolve = resolve;
+    pendingNativeFolderTimer = window.setTimeout(() => {
+      if (!pendingNativeFolderResolve) {
+        return;
+      }
+      const done = pendingNativeFolderResolve;
+      pendingNativeFolderResolve = null;
+      pendingNativeFolderTimer = null;
+      done({ ok: false, error: "timeout" });
+    }, 180000);
+
+    try {
+      window.AndroidBridge.pickStudyFolder();
+    } catch (error) {
+      console.error(error);
+      const done = pendingNativeFolderResolve;
+      pendingNativeFolderResolve = null;
+      if (pendingNativeFolderTimer) {
+        clearTimeout(pendingNativeFolderTimer);
+        pendingNativeFolderTimer = null;
+      }
+      if (done) {
+        done({ ok: false, error: "bridge_error" });
+      }
+    }
+  });
+}
+
+function onNativeFolderPicked(rawPayload) {
+  if (!pendingNativeFolderResolve) {
+    return;
+  }
+
+  let payload = null;
+  try {
+    payload = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
+  } catch (error) {
+    console.warn("onNativeFolderPicked parse error", error);
+  }
+
+  const done = pendingNativeFolderResolve;
+  pendingNativeFolderResolve = null;
+  if (pendingNativeFolderTimer) {
+    clearTimeout(pendingNativeFolderTimer);
+    pendingNativeFolderTimer = null;
+  }
+
+  done(payload || { ok: false, error: "invalid_payload" });
+}
+
 async function refreshScan() {
   if (state.scanning) {
+    return;
+  }
+
+  if (supportsNativeFolderPicker()) {
+    await connectNativeFolder();
     return;
   }
 
@@ -330,6 +452,9 @@ async function ingestFiles(fileList, options) {
 
   const replace = Boolean(options && options.replace);
   const keepRelativePath = Boolean(options && options.keepRelativePath);
+  if (replace) {
+    state.nativeFileMap = new Map();
+  }
   const nextPool = replace ? new Map() : state.filePool || new Map();
   const nextItems = [];
   const usedPaths = new Set(replace ? [] : Array.from(state.libraryMap.keys()));
@@ -435,6 +560,15 @@ function setLibrary(nextLibrary, persist) {
     .filter(Boolean);
 
   rebuildLibraryMap();
+  if (state.nativeFileMap.size) {
+    const nextNativeMap = new Map();
+    for (const [path, entry] of state.nativeFileMap.entries()) {
+      if (state.libraryMap.has(path)) {
+        nextNativeMap.set(path, entry);
+      }
+    }
+    state.nativeFileMap = nextNativeMap;
+  }
   pruneQueueAndDone();
   applyFilters();
   renderQueue();
@@ -851,6 +985,15 @@ async function openItem(path) {
   updateMemoAvailability();
 
   try {
+    const nativeEntry = state.nativeFileMap.get(path);
+    if (nativeEntry && nativeEntry.url) {
+      showNativeInViewer(item, nativeEntry.url);
+      setStatus(`${item.subject} / ${item.name}`);
+      renderItemList();
+      renderQueue();
+      return;
+    }
+
     const file = await resolveFile(path);
     if (!file) {
       setStatus("教材ファイルを開けません。フォルダを再接続してください。", "warn");
@@ -888,6 +1031,29 @@ function showFileInViewer(item, file) {
   el.pdfViewer.removeAttribute("src");
   el.audioTitle.textContent = item.name;
   el.audioPlayer.src = state.currentObjectUrl;
+  el.audioWrap.hidden = false;
+  el.audioPlayer.play().catch(() => {});
+}
+
+function showNativeInViewer(item, nativeUrl) {
+  revokeObjectUrl();
+  el.viewerPlaceholder.hidden = true;
+
+  if (item.type === "pdf") {
+    el.audioPlayer.pause();
+    el.audioPlayer.removeAttribute("src");
+    el.audioPlayer.load();
+    el.audioWrap.hidden = true;
+
+    el.pdfViewer.src = `${nativeUrl}#view=FitH`;
+    el.pdfViewer.hidden = false;
+    return;
+  }
+
+  el.pdfViewer.hidden = true;
+  el.pdfViewer.removeAttribute("src");
+  el.audioTitle.textContent = item.name;
+  el.audioPlayer.src = nativeUrl;
   el.audioWrap.hidden = false;
   el.audioPlayer.play().catch(() => {});
 }
@@ -1027,7 +1193,7 @@ function setStatusFromState() {
     return;
   }
 
-  if (state.rootHandle || state.filePool) {
+  if (state.rootHandle || state.filePool || state.nativeFileMap.size) {
     setStatus(`教材 ${state.library.length} 件を読み込み済み。`);
     return;
   }
@@ -1082,6 +1248,10 @@ function isRunningAsInstalledApp() {
 
 function isIOSDevice() {
   return /iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+
+function supportsNativeFolderPicker() {
+  return Boolean(window.AndroidBridge && typeof window.AndroidBridge.pickStudyFolder === "function");
 }
 
 function supportsDirectoryPicker() {
