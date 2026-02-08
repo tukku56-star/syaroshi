@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$SourceFolder,
-    [string]$OutputZip = (Join-Path $PSScriptRoot "study-sync.zip")
+    [string]$OutputZip = (Join-Path $PSScriptRoot "study-sync.zip"),
+    [ValidateSet("Optimal", "Fastest", "NoCompression")]
+    [string]$CompressionLevel = "Fastest"
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,6 +37,7 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::Open($outputPath, [System.IO.Compression.ZipArchiveMode]::Create)
 $sourceUri = New-Object System.Uri(($sourcePath.TrimEnd('\') + '\'))
+$compression = [System.Enum]::Parse([System.IO.Compression.CompressionLevel], $CompressionLevel)
 try {
     foreach ($file in $files) {
         $fileUri = New-Object System.Uri($file.FullName)
@@ -43,7 +46,7 @@ try {
             $zip,
             $file.FullName,
             $relativePath,
-            [System.IO.Compression.CompressionLevel]::Optimal
+            $compression
         ) | Out-Null
     }
 }
@@ -53,3 +56,4 @@ finally {
 
 Write-Host "Created: $outputPath"
 Write-Host "Included files: $($files.Count)"
+Write-Host "Compression: $CompressionLevel"
