@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.webkit.JavascriptInterface
@@ -17,6 +18,7 @@ import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
+import androidx.core.content.FileProvider
 import androidx.appcompat.app.AppCompatActivity
 import androidx.documentfile.provider.DocumentFile
 import org.json.JSONArray
@@ -25,6 +27,8 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.ArrayDeque
 import java.util.Locale
 import java.util.UUID
@@ -35,6 +39,11 @@ class MainActivity : AppCompatActivity() {
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private val nativeFileMap = mutableMapOf<String, Uri>()
     private val nativeFileLock = Any()
+    private val pdfLaunchLock = Any()
+    private var lastPdfLaunchId: String = ""
+    private var lastPdfLaunchAtMs: Long = 0L
+    private var cachedNativePayload: JSONObject? = null
+    private var restoredPayloadDispatched = false
 
     private val fileChooserLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -82,6 +91,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        restoreNativeStateFromPrefs()
 
         webView = findViewById(R.id.webView)
         configureWebView()
@@ -141,6 +151,11 @@ class MainActivity : AppCompatActivity() {
                     return nativeResponse
                 }
                 return super.shouldInterceptRequest(view, request)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                dispatchCachedPayloadIfAvailable()
             }
         }
 
@@ -390,6 +405,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             val name = resolveDisplayName(uri)
+            if (shouldSkipAudio(name)) {
+                continue
+            }
             val type = detectStudyType(name) ?: detectStudyTypeFromMime(contentResolver.getType(uri)) ?: continue
             val prefix = if ((uri.authority ?: "").contains("google.android.apps.docs")) "GoogleDrive" else "追加"
             val path = uniquePath("$prefix/$name", usedPaths)
@@ -406,10 +424,15 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        synchronized(nativeFileLock) {
-            nativeFileMap.clear()
-            nativeFileMap.putAll(nextNativeMap)
+        if (nextNativeMap.isEmpty()) {
+            dispatchNativeFolderPayload(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "no_supported_files")
+            )
+            return
         }
+        replaceNativeState(nextNativeMap, files)
 
         dispatchNativeFolderPayload(
             JSONObject()
@@ -514,6 +537,10 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     val fileName = relativePath.substringAfterLast('/')
+                    if (shouldSkipAudio(fileName)) {
+                        zip.closeEntry()
+                        continue
+                    }
                     val type = detectStudyType(fileName)
                     if (type == null) {
                         zip.closeEntry()
@@ -555,16 +582,12 @@ class MainActivity : AppCompatActivity() {
                 .put("error", "zip_unavailable")
         }
 
-        synchronized(nativeFileLock) {
-            nativeFileMap.clear()
-            nativeFileMap.putAll(nextNativeMap)
-        }
-
         if (nextNativeMap.isEmpty()) {
             return JSONObject()
                 .put("ok", false)
                 .put("error", "no_supported_files")
         }
+        replaceNativeState(nextNativeMap, files)
 
         return JSONObject()
             .put("ok", true)
@@ -694,6 +717,9 @@ class MainActivity : AppCompatActivity() {
                     if (name.startsWith(".")) {
                         continue
                     }
+                    if (shouldSkipAudio(name)) {
+                        continue
+                    }
 
                     val path = if (prefix.isEmpty()) name else "$prefix/$name"
                     val isDirectory =
@@ -722,16 +748,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        synchronized(nativeFileLock) {
-            nativeFileMap.clear()
-            nativeFileMap.putAll(nextNativeMap)
-        }
-
         if (nextNativeMap.isEmpty()) {
             return JSONObject()
                 .put("ok", false)
                 .put("error", "no_supported_files")
         }
+        replaceNativeState(nextNativeMap, files)
 
         return JSONObject()
             .put("ok", true)
@@ -765,6 +787,9 @@ class MainActivity : AppCompatActivity() {
                 if (name.startsWith(".")) {
                     continue
                 }
+                if (shouldSkipAudio(name)) {
+                    continue
+                }
 
                 val path = if (prefix.isEmpty()) name else "$prefix/$name"
                 if (child.isDirectory) {
@@ -788,16 +813,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        synchronized(nativeFileLock) {
-            nativeFileMap.clear()
-            nativeFileMap.putAll(nextNativeMap)
-        }
-
         if (nextNativeMap.isEmpty()) {
             return JSONObject()
                 .put("ok", false)
                 .put("error", "no_supported_files")
         }
+        replaceNativeState(nextNativeMap, files)
 
         return JSONObject()
             .put("ok", true)
@@ -811,9 +832,202 @@ class MainActivity : AppCompatActivity() {
             return "pdf"
         }
         if (AUDIO_EXTENSIONS.any { lower.endsWith(it) }) {
+            if (shouldSkipAudio(name)) {
+                return null
+            }
             return "audio"
         }
         return null
+    }
+
+    private fun shouldSkipAudio(name: String): Boolean {
+        val normalized = name.replace("\\s+".toRegex(), "")
+        return normalized.contains("1.5倍速") || normalized.contains("2倍速") || normalized.contains("1.5x") || normalized.contains("2x")
+    }
+
+    private fun replaceNativeState(nextNativeMap: Map<String, Uri>, files: JSONArray) {
+        synchronized(nativeFileLock) {
+            nativeFileMap.clear()
+            nativeFileMap.putAll(nextNativeMap)
+        }
+        val payload = JSONObject()
+            .put("ok", true)
+            .put("count", nextNativeMap.size)
+            .put("files", files)
+        cachedNativePayload = payload
+        restoredPayloadDispatched = false
+        persistNativeStateToPrefs(nextNativeMap, payload)
+    }
+
+    private fun restoreNativeStateFromPrefs() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val raw = prefs.getString(PREF_KEY_NATIVE_MAP, null) ?: return
+        val restored = mutableMapOf<String, Uri>()
+        try {
+            val json = JSONObject(raw)
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val id = keys.next()
+                if (id.isBlank()) {
+                    continue
+                }
+                val uriText = json.optString(id, "")
+                if (uriText.isBlank()) {
+                    continue
+                }
+                restored[id] = Uri.parse(uriText)
+            }
+        } catch (_: Exception) {
+            clearNativeStatePrefs()
+            synchronized(nativeFileLock) {
+                nativeFileMap.clear()
+            }
+            cachedNativePayload = null
+            return
+        }
+
+        synchronized(nativeFileLock) {
+            nativeFileMap.clear()
+            nativeFileMap.putAll(restored)
+        }
+
+        val payloadRaw = prefs.getString(PREF_KEY_NATIVE_PAYLOAD, null)
+        cachedNativePayload = try {
+            if (payloadRaw.isNullOrBlank()) {
+                null
+            } else {
+                JSONObject(payloadRaw)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun persistNativeStateToPrefs(map: Map<String, Uri>, payload: JSONObject) {
+        val json = JSONObject()
+        for ((id, uri) in map) {
+            if (id.isBlank()) {
+                continue
+            }
+            json.put(id, uri.toString())
+        }
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(PREF_KEY_NATIVE_MAP, json.toString())
+            .putString(PREF_KEY_NATIVE_PAYLOAD, payload.toString())
+            .apply()
+    }
+
+    private fun clearNativeStatePrefs() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .remove(PREF_KEY_NATIVE_MAP)
+            .remove(PREF_KEY_NATIVE_PAYLOAD)
+            .apply()
+    }
+
+    private fun extractNativeFileId(nativeUrl: String): String? {
+        return try {
+            val uri = Uri.parse(nativeUrl)
+            if (!uri.scheme.equals("https", ignoreCase = true) || uri.host != NATIVE_HOST) {
+                return null
+            }
+            val segments = uri.pathSegments
+            if (segments.size < 2 || segments[0] != NATIVE_FILE_PATH) {
+                return null
+            }
+            segments[1]
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun copyPdfToShareCache(nativeId: String, sourceUri: Uri): File? {
+        val dir = File(cacheDir, "shared-pdf")
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        val safeId = nativeId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val outFile = File(dir, "$safeId.pdf")
+        return try {
+            val input = openNativeInputStream(sourceUri) ?: return null
+            input.use { stream ->
+                FileOutputStream(outFile).use { output ->
+                    stream.copyTo(output)
+                }
+            }
+            outFile
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun openPdfFileExternally(file: File): Boolean {
+        return try {
+            val contentUri =
+                FileProvider.getUriForFile(
+                    this,
+                    "$packageName.fileprovider",
+                    file
+                )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(contentUri, "application/pdf")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun openPdfFromUri(nativeId: String, sourceUri: Uri): Boolean {
+        val file = copyPdfToShareCache(nativeId, sourceUri) ?: return false
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return openPdfFileExternally(file)
+        }
+        val latch = CountDownLatch(1)
+        var opened = false
+        return try {
+            runOnUiThread {
+                opened = openPdfFileExternally(file)
+                latch.countDown()
+            }
+            latch.await(2, TimeUnit.SECONDS)
+            opened
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun shouldLaunchPdfExternally(nativeId: String): Boolean {
+        val now = System.currentTimeMillis()
+        synchronized(pdfLaunchLock) {
+            if (nativeId == lastPdfLaunchId && now - lastPdfLaunchAtMs < 1500) {
+                return false
+            }
+            lastPdfLaunchId = nativeId
+            lastPdfLaunchAtMs = now
+            return true
+        }
+    }
+
+    private fun dispatchCachedPayloadIfAvailable() {
+        dispatchCachedPayloadIfAvailable(force = false)
+    }
+
+    private fun dispatchCachedPayloadIfAvailable(force: Boolean) {
+        if (!force && restoredPayloadDispatched) {
+            return
+        }
+        val payload = cachedNativePayload ?: return
+        val hasMap = synchronized(nativeFileLock) { nativeFileMap.isNotEmpty() }
+        if (!hasMap) {
+            return
+        }
+        restoredPayloadDispatched = true
+        dispatchNativeFolderPayload(payload)
     }
 
     private fun interceptNativeFileRequest(url: Uri): WebResourceResponse? {
@@ -830,8 +1044,14 @@ class MainActivity : AppCompatActivity() {
         val targetUri = synchronized(nativeFileLock) { nativeFileMap[id] } ?: return emptyResponse(404, "Not Found")
 
         return try {
-            val stream = openNativeInputStream(targetUri) ?: return emptyResponse(404, "Not Found")
             val mime = contentResolver.getType(targetUri) ?: guessMimeType(targetUri.toString())
+            if (mime.equals("application/pdf", ignoreCase = true) && shouldLaunchPdfExternally(id)) {
+                val opened = openPdfFromUri(id, targetUri)
+                if (opened) {
+                    return emptyResponse(204, "No Content")
+                }
+            }
+            val stream = openNativeInputStream(targetUri) ?: return emptyResponse(404, "Not Found")
             WebResourceResponse(mime, null, stream).apply {
                 setStatusCodeAndReasonPhrase(200, "OK")
                 responseHeaders = mapOf(
@@ -874,8 +1094,65 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun dispatchNativeFolderPayload(payload: JSONObject) {
-        val script = "window.__onNativeFolderPicked(${JSONObject.quote(payload.toString())});"
-        webView.evaluateJavascript(script, null)
+        dispatchNativeFolderPayload(payload, 0)
+    }
+
+    private fun dispatchNativeFolderPayload(payload: JSONObject, attempt: Int) {
+        val quoted = JSONObject.quote(payload.toString())
+        val script =
+            "(function(){" +
+                "const raw = $quoted;" +
+                "try {" +
+                "const payload = typeof raw === 'string' ? JSON.parse(raw) : raw;" +
+                "if (payload && payload.ok === true && typeof state === 'object' && typeof setLibrary === 'function' && typeof buildItem === 'function') {" +
+                "const files = Array.isArray(payload.files) ? payload.files : [];" +
+                "const nextItems = [];" +
+                "const nativeMap = new Map();" +
+                "const usedPaths = new Set();" +
+                "for (const row of files) {" +
+                "const rawPath = String(row && row.path ? row.path : '').replace(/\\\\/g, '/').trim();" +
+                "const type = row && (row.type === 'pdf' || row.type === 'audio') ? row.type : (typeof detectType === 'function' ? detectType(rawPath) : '');" +
+                "const url = String(row && row.url ? row.url : '').trim();" +
+                "if (!rawPath || !type || !url) { continue; }" +
+                "const uniquePath = typeof createUniquePath === 'function' ? createUniquePath(rawPath, usedPaths) : rawPath;" +
+                "usedPaths.add(uniquePath);" +
+                "nextItems.push(typeof buildItem === 'function' ? buildItem(uniquePath, type) : { path: uniquePath, type: type });" +
+                "nativeMap.set(uniquePath, { url: url, type: type });" +
+                "}" +
+                "if (typeof compareItems === 'function') { nextItems.sort(compareItems); }" +
+                "state.nativeFileMap = nativeMap;" +
+                "state.filePool = null;" +
+                "state.rootHandle = null;" +
+                "if (typeof clearRootHandle === 'function') { try { clearRootHandle(); } catch (_) {} }" +
+                "if (typeof el === 'object' && el && el.refreshBtn) { el.refreshBtn.disabled = false; }" +
+                "setLibrary(nextItems, true);" +
+                "if (typeof setStatus === 'function') { setStatus('フォルダ読み込み完了: ' + nextItems.length + '件'); }" +
+                "return 'ok';" +
+                "}" +
+                "if (typeof window.__onNativeFolderPicked === 'function') {" +
+                "window.__onNativeFolderPicked(raw);" +
+                "return 'ok';" +
+                "}" +
+                "} catch (_) {" +
+                "if (typeof window.__onNativeFolderPicked === 'function') {" +
+                "window.__onNativeFolderPicked(raw);" +
+                "return 'ok';" +
+                "}" +
+                "}" +
+                "return 'missing';" +
+                "})();"
+        webView.evaluateJavascript(script) { result ->
+            if (result == "\"ok\"") {
+                return@evaluateJavascript
+            }
+            if (attempt >= 20) {
+                return@evaluateJavascript
+            }
+            webView.postDelayed(
+                { dispatchNativeFolderPayload(payload, attempt + 1) },
+                250
+            )
+        }
     }
 
     private inner class AndroidBridge {
@@ -891,6 +1168,20 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 showStudySourceChooser()
             }
+        }
+
+        @JavascriptInterface
+        fun restoreNativeStudyData() {
+            runOnUiThread {
+                dispatchCachedPayloadIfAvailable(force = true)
+            }
+        }
+
+        @JavascriptInterface
+        fun openPdfFromNativeUrl(nativeUrl: String): Boolean {
+            val id = extractNativeFileId(nativeUrl) ?: return false
+            val sourceUri = synchronized(nativeFileLock) { nativeFileMap[id] } ?: return false
+            return openPdfFromUri(id, sourceUri)
         }
     }
 
@@ -909,6 +1200,9 @@ class MainActivity : AppCompatActivity() {
         private const val NATIVE_HOST = "native.local"
         private const val NATIVE_FILE_PATH = "native-file"
         private const val NATIVE_FILE_BASE = "https://native.local/native-file"
+        private const val PREFS_NAME = "offline-study-native"
+        private const val PREF_KEY_NATIVE_MAP = "native_file_map_json"
+        private const val PREF_KEY_NATIVE_PAYLOAD = "native_payload_json"
         private val AUDIO_EXTENSIONS = setOf(".mp3", ".m4a", ".aac", ".wav", ".ogg")
         private val SKIP_DIRECTORIES = setOf(".git", "offline-study-app", "node_modules")
     }

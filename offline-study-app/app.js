@@ -8,7 +8,8 @@ const STORAGE_KEYS = {
   selectedType: "sharoushi.offline.selectedType",
   selectedSubject: "sharoushi.offline.selectedSubject",
   query: "sharoushi.offline.query",
-  installGuideDismissed: "sharoushi.offline.installGuideDismissed"
+  installGuideDismissed: "sharoushi.offline.installGuideDismissed",
+  nativeMap: "sharoushi.offline.nativeMap"
 };
 
 const DB_NAME = "sharoushi-offline-db";
@@ -19,6 +20,8 @@ const ROOT_HANDLE_KEY = "study-root";
 const AUDIO_EXTENSIONS = [".mp3", ".m4a", ".aac", ".wav", ".ogg"];
 const SKIP_DIRECTORIES = new Set([".git", "offline-study-app", "node_modules"]);
 const MAX_RENDER_ITEMS = 350;
+const VIEWER_PLACEHOLDER_DEFAULT_TITLE = "教材を選択してください";
+const VIEWER_PLACEHOLDER_DEFAULT_TEXT = "PDFは右側で閲覧、音声はそのまま再生できます。今日のキューに追加すると進捗管理しやすくなります。";
 
 const state = {
   library: [],
@@ -68,6 +71,7 @@ async function init() {
   await registerServiceWorker();
   await restoreRootHandle();
   setStatusFromState();
+  requestNativeRestore();
   refreshInstallGuide();
 }
 
@@ -169,9 +173,76 @@ function hydrateState() {
       .filter(Boolean);
   }
   rebuildLibraryMap();
+  hydrateNativeMap();
+  syncNativeMapToLibrary();
 
   el.typeFilter.value = state.selectedType;
   el.searchInput.value = state.query;
+}
+
+function hydrateNativeMap() {
+  if (!supportsNativeFolderPicker()) {
+    clearNativeMapStorage();
+    return;
+  }
+  const stored = loadJson(STORAGE_KEYS.nativeMap, []);
+  if (!Array.isArray(stored)) {
+    clearNativeMapStorage();
+    return;
+  }
+
+  const map = new Map();
+  for (const row of stored) {
+    if (!row || typeof row !== "object") {
+      continue;
+    }
+    const path = String(row.path || "").trim();
+    const url = String(row.url || "").trim();
+    const type = row.type === "audio" ? "audio" : row.type === "pdf" ? "pdf" : null;
+    if (!path || !url || !type) {
+      continue;
+    }
+    map.set(path, { url, type });
+  }
+
+  state.nativeFileMap = map;
+}
+
+function syncNativeMapToLibrary() {
+  if (!state.nativeFileMap.size) {
+    return;
+  }
+  const nextNativeMap = new Map();
+  for (const [path, entry] of state.nativeFileMap.entries()) {
+    if (state.libraryMap.has(path)) {
+      nextNativeMap.set(path, entry);
+    }
+  }
+  state.nativeFileMap = nextNativeMap;
+  saveNativeMap();
+}
+
+function serializeNativeMap(map) {
+  const output = [];
+  for (const [path, entry] of map.entries()) {
+    if (!entry || !entry.url || !entry.type) {
+      continue;
+    }
+    output.push({ path, url: entry.url, type: entry.type });
+  }
+  return output;
+}
+
+function saveNativeMap() {
+  if (!supportsNativeFolderPicker()) {
+    clearNativeMapStorage();
+    return;
+  }
+  saveJson(STORAGE_KEYS.nativeMap, serializeNativeMap(state.nativeFileMap));
+}
+
+function clearNativeMapStorage() {
+  saveJson(STORAGE_KEYS.nativeMap, []);
 }
 
 function onSearchInput() {
@@ -356,6 +427,7 @@ async function connectNativeFolder() {
     state.rootHandle = null;
     await clearRootHandle();
     el.refreshBtn.disabled = false;
+    saveNativeMap();
     setLibrary(nextItems, true);
     setStatus(`フォルダ読み込み完了: ${nextItems.length}件`);
   } catch (error) {
@@ -479,6 +551,7 @@ async function ingestFiles(fileList, options) {
   const keepRelativePath = Boolean(options && options.keepRelativePath);
   if (replace) {
     state.nativeFileMap = new Map();
+    clearNativeMapStorage();
   }
   const nextPool = replace ? new Map() : state.filePool || new Map();
   const nextItems = [];
@@ -593,6 +666,7 @@ function setLibrary(nextLibrary, persist) {
       }
     }
     state.nativeFileMap = nextNativeMap;
+    saveNativeMap();
   }
   pruneQueueAndDone();
   applyFilters();
@@ -657,12 +731,20 @@ function detectType(nameOrPath) {
   if (lower.endsWith(".pdf")) {
     return "pdf";
   }
+  if (shouldSkipAudio(nameOrPath)) {
+    return "";
+  }
   for (const ext of AUDIO_EXTENSIONS) {
     if (lower.endsWith(ext)) {
       return "audio";
     }
   }
   return "";
+}
+
+function shouldSkipAudio(nameOrPath) {
+  const normalized = String(nameOrPath).replace(/\s+/g, "");
+  return normalized.includes("1.5倍速") || normalized.includes("2倍速") || normalized.includes("1.5x") || normalized.includes("2x");
 }
 
 function detectMaterial(name, path, type) {
@@ -1039,7 +1121,7 @@ async function openItem(path) {
 function showFileInViewer(item, file) {
   revokeObjectUrl();
   state.currentObjectUrl = URL.createObjectURL(file);
-  el.viewerPlaceholder.hidden = true;
+  hideViewerPlaceholder();
 
   if (item.type === "pdf") {
     el.audioPlayer.pause();
@@ -1062,13 +1144,23 @@ function showFileInViewer(item, file) {
 
 function showNativeInViewer(item, nativeUrl) {
   revokeObjectUrl();
-  el.viewerPlaceholder.hidden = true;
+  hideViewerPlaceholder();
 
   if (item.type === "pdf") {
     el.audioPlayer.pause();
     el.audioPlayer.removeAttribute("src");
     el.audioPlayer.load();
     el.audioWrap.hidden = true;
+
+    if (openPdfInAndroidExternalViewer(nativeUrl)) {
+      el.pdfViewer.hidden = true;
+      el.pdfViewer.removeAttribute("src");
+      showViewerPlaceholder(
+        "PDFを外部アプリで開いています",
+        "端末のPDFビューアで表示します。戻ると学習アプリに戻れます。"
+      );
+      return;
+    }
 
     el.pdfViewer.src = `${nativeUrl}#view=FitH`;
     el.pdfViewer.hidden = false;
@@ -1081,6 +1173,45 @@ function showNativeInViewer(item, nativeUrl) {
   el.audioPlayer.src = nativeUrl;
   el.audioWrap.hidden = false;
   el.audioPlayer.play().catch(() => {});
+}
+
+function openPdfInAndroidExternalViewer(nativeUrl) {
+  if (!isAndroidWebView()) {
+    return false;
+  }
+  if (!window.AndroidBridge || typeof window.AndroidBridge.openPdfFromNativeUrl !== "function") {
+    return false;
+  }
+  try {
+    const result = window.AndroidBridge.openPdfFromNativeUrl(nativeUrl);
+    return result === true || result === "true" || result === 1 || result === "1";
+  } catch (error) {
+    console.warn("openPdfFromNativeUrl", error);
+    return false;
+  }
+}
+
+function showViewerPlaceholder(title, text) {
+  if (!el.viewerPlaceholder) {
+    return;
+  }
+  const titleEl = el.viewerPlaceholder.querySelector("h2");
+  const textEl = el.viewerPlaceholder.querySelector("p");
+  if (titleEl) {
+    titleEl.textContent = title || VIEWER_PLACEHOLDER_DEFAULT_TITLE;
+  }
+  if (textEl) {
+    textEl.textContent = text || VIEWER_PLACEHOLDER_DEFAULT_TEXT;
+  }
+  el.viewerPlaceholder.hidden = false;
+}
+
+function hideViewerPlaceholder() {
+  if (!el.viewerPlaceholder) {
+    return;
+  }
+  showViewerPlaceholder(VIEWER_PLACEHOLDER_DEFAULT_TITLE, VIEWER_PLACEHOLDER_DEFAULT_TEXT);
+  el.viewerPlaceholder.hidden = true;
 }
 
 async function resolveFile(path) {
@@ -1224,6 +1355,20 @@ function setStatusFromState() {
   }
 
   setStatus("教材一覧は読み込み済みです。閲覧にはフォルダ接続が必要です。", "warn");
+}
+
+function requestNativeRestore() {
+  if (!supportsNativeFolderPicker()) {
+    return;
+  }
+  if (!window.AndroidBridge || typeof window.AndroidBridge.restoreNativeStudyData !== "function") {
+    return;
+  }
+  try {
+    window.AndroidBridge.restoreNativeStudyData();
+  } catch (error) {
+    console.warn("restoreNativeStudyData", error);
+  }
 }
 
 function refreshInstallGuide() {
