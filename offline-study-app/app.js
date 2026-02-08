@@ -43,6 +43,7 @@ const state = {
 
 let pendingNativeFolderResolve = null;
 let pendingNativeFolderTimer = null;
+const NATIVE_PICK_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 const el = {};
 
@@ -295,13 +296,13 @@ function addFiles() {
 
 async function connectNativeFolder() {
   state.scanning = true;
-  setStatus("フォルダ選択を開いています...");
+  setStatus("教材データ選択を開いています...");
 
   try {
     const payload = await requestNativeFolderPick();
     if (!payload || payload.ok !== true) {
       if (payload && payload.error === "canceled") {
-        setStatus("フォルダ選択をキャンセルしました。", "warn");
+        setStatus("データ選択をキャンセルしました。", "warn");
         return;
       }
       if (payload && payload.error === "no_supported_files") {
@@ -309,7 +310,19 @@ async function connectNativeFolder() {
         return;
       }
       if (payload && payload.error === "picker_unavailable") {
-        setStatus("フォルダ選択画面を開けませんでした。", "error");
+        setStatus("データ選択画面を開けませんでした。", "error");
+        return;
+      }
+      if (payload && payload.error === "folder_unavailable") {
+        setStatus("このフォルダは読み込めませんでした。別のフォルダを選ぶか「フォルダ丸ごと選択（このフォルダを使用 / 標準）」を試してください。", "warn");
+        return;
+      }
+      if (payload && payload.error === "zip_unavailable") {
+        setStatus("ZIPの読み込みに失敗しました。PCで作成し直して再選択してください。", "warn");
+        return;
+      }
+      if (payload && payload.error === "timeout") {
+        setStatus("取り込みに時間がかかっています。大容量ZIPは時間がかかるため、しばらく待つかZIPを分割してください。", "warn");
         return;
       }
       setStatus("Androidフォルダ接続に失敗しました。", "error");
@@ -372,7 +385,7 @@ function requestNativeFolderPick() {
       pendingNativeFolderResolve = null;
       pendingNativeFolderTimer = null;
       done({ ok: false, error: "timeout" });
-    }, 180000);
+    }, NATIVE_PICK_TIMEOUT_MS);
 
     try {
       if (typeof window.AndroidBridge.pickStudySource === "function") {

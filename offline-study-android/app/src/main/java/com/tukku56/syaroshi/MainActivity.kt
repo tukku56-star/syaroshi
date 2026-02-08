@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
@@ -21,9 +22,13 @@ import androidx.documentfile.provider.DocumentFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.ArrayDeque
 import java.util.Locale
 import java.util.UUID
+import java.util.zip.ZipInputStream
 
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
@@ -41,17 +46,37 @@ class MainActivity : AppCompatActivity() {
 
     private val studyFolderPickerLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val directoryUri = result.data?.data
+            if (result.resultCode == RESULT_OK) {
+                onDirectoryFolderPicked(directoryUri)
+            } else {
+                onDirectoryFolderPicked(null)
+            }
+        }
+
+    private val driveFolderPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val treeUri = result.data?.data
             if (result.resultCode == RESULT_OK) {
-                onStudyFolderPicked(treeUri)
+                onTreeFolderPicked(treeUri)
             } else {
-                onStudyFolderPicked(null)
+                onTreeFolderPicked(null)
             }
         }
 
     private val studyFilesPickerLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             onStudyFilesPicked(result.resultCode, result.data)
+        }
+
+    private val studyZipPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val zipUri = result.data?.data
+            if (result.resultCode == RESULT_OK) {
+                onStudyZipPicked(zipUri)
+            } else {
+                onStudyZipPicked(null)
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -153,7 +178,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun onStudyFolderPicked(treeUri: Uri?) {
+    private fun onTreeFolderPicked(treeUri: Uri?) {
         if (treeUri == null) {
             dispatchNativeFolderPayload(
                 JSONObject()
@@ -175,16 +200,64 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun onDirectoryFolderPicked(directoryUri: Uri?) {
+        if (directoryUri == null) {
+            dispatchNativeFolderPayload(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "canceled")
+            )
+            return
+        }
+
+        try {
+            contentResolver.takePersistableUriPermission(directoryUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+            // Some providers do not allow persistable permissions.
+        }
+
+        Thread {
+            val payload = buildStudyFolderPayloadFromDirectoryUri(directoryUri)
+            runOnUiThread { dispatchNativeFolderPayload(payload) }
+        }.start()
+    }
+
+    private fun onStudyZipPicked(zipUri: Uri?) {
+        if (zipUri == null) {
+            dispatchNativeFolderPayload(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "canceled")
+            )
+            return
+        }
+
+        try {
+            contentResolver.takePersistableUriPermission(zipUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+            // Some providers do not allow persistable permissions.
+        }
+
+        Thread {
+            val payload = buildStudyFolderPayloadFromZip(zipUri)
+            runOnUiThread { dispatchNativeFolderPayload(payload) }
+        }.start()
+    }
+
     private fun showStudySourceChooser() {
         val options = arrayOf(
-            "フォルダ丸ごと選択（端末/Google Drive）",
-            "Google Driveのファイル選択（複数）"
+            "PC同期ZIPをインポート（推奨）",
+            "フォルダ丸ごと選択（このフォルダを使用 / 標準）",
+            "フォルダ丸ごと選択（フォルダ名タップ / 互換）",
+            "ファイル選択（最終手段）"
         )
         AlertDialog.Builder(this)
             .setTitle("学習データの取り込み")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> openStudyFolderPicker()
+                    0 -> openStudyZipPicker()
+                    1 -> openDriveFolderPicker()
+                    2 -> openStudyFolderPicker()
                     else -> openStudyFilesPicker()
                 }
             }
@@ -198,8 +271,34 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun openStudyZipPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/zip", "application/x-zip-compressed"))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+
+        try {
+            studyZipPickerLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            dispatchNativeFolderPayload(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "picker_unavailable")
+            )
+        }
+    }
+
     private fun openStudyFolderPicker() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("vnd.android.document/directory", "application/vnd.google-apps.folder")
+            )
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
@@ -214,6 +313,21 @@ class MainActivity : AppCompatActivity() {
                     .put("ok", false)
                     .put("error", "picker_unavailable")
             )
+        }
+    }
+
+    private fun openDriveFolderPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+            putExtra(Intent.EXTRA_LOCAL_ONLY, false)
+        }
+
+        try {
+            driveFolderPickerLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            openStudyFolderPicker()
         }
     }
 
@@ -362,6 +476,269 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun buildStudyFolderPayloadFromZip(zipUri: Uri): JSONObject {
+        val rootDir = File(filesDir, "study-sync")
+        if (!prepareSyncDirectory(rootDir)) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "zip_unavailable")
+        }
+
+        val files = JSONArray()
+        val nextNativeMap = mutableMapOf<String, Uri>()
+        val rootCanonical = try {
+            rootDir.canonicalFile
+        } catch (_: Exception) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "zip_unavailable")
+        }
+
+        try {
+            val input = contentResolver.openInputStream(zipUri) ?: return JSONObject()
+                .put("ok", false)
+                .put("error", "zip_unavailable")
+
+            ZipInputStream(input).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (entry.isDirectory) {
+                        zip.closeEntry()
+                        continue
+                    }
+
+                    val relativePath = sanitizeZipEntryPath(entry.name)
+                    if (relativePath == null) {
+                        zip.closeEntry()
+                        continue
+                    }
+
+                    val fileName = relativePath.substringAfterLast('/')
+                    val type = detectStudyType(fileName)
+                    if (type == null) {
+                        zip.closeEntry()
+                        continue
+                    }
+
+                    val outFile = File(rootDir, relativePath)
+                    val outCanonical = try {
+                        outFile.canonicalFile
+                    } catch (_: Exception) {
+                        zip.closeEntry()
+                        continue
+                    }
+                    if (!isInsideDirectory(rootCanonical, outCanonical)) {
+                        zip.closeEntry()
+                        continue
+                    }
+
+                    outCanonical.parentFile?.mkdirs()
+                    FileOutputStream(outCanonical).use { output ->
+                        zip.copyTo(output)
+                    }
+
+                    val id = UUID.randomUUID().toString()
+                    nextNativeMap[id] = Uri.fromFile(outCanonical)
+                    files.put(
+                        JSONObject()
+                            .put("path", relativePath)
+                            .put("name", fileName)
+                            .put("type", type)
+                            .put("url", "$NATIVE_FILE_BASE/$id")
+                    )
+                    zip.closeEntry()
+                }
+            }
+        } catch (_: Exception) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "zip_unavailable")
+        }
+
+        synchronized(nativeFileLock) {
+            nativeFileMap.clear()
+            nativeFileMap.putAll(nextNativeMap)
+        }
+
+        if (nextNativeMap.isEmpty()) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "no_supported_files")
+        }
+
+        return JSONObject()
+            .put("ok", true)
+            .put("count", nextNativeMap.size)
+            .put("files", files)
+    }
+
+    private fun prepareSyncDirectory(rootDir: File): Boolean {
+        return try {
+            if (rootDir.exists()) {
+                rootDir.deleteRecursively()
+            }
+            rootDir.mkdirs()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun sanitizeZipEntryPath(rawPath: String?): String? {
+        if (rawPath.isNullOrBlank()) {
+            return null
+        }
+        val normalized = rawPath.replace('\\', '/').trim('/')
+        if (normalized.isEmpty()) {
+            return null
+        }
+        val cleaned = normalized
+            .split('/')
+            .filter { it.isNotBlank() && it != "." && it != ".." }
+        if (cleaned.isEmpty()) {
+            return null
+        }
+        return cleaned.joinToString("/")
+    }
+
+    private fun isInsideDirectory(root: File, target: File): Boolean {
+        val rootPath = root.path
+        val targetPath = target.path
+        return targetPath == rootPath || targetPath.startsWith("$rootPath${File.separator}")
+    }
+
+    private fun buildStudyFolderPayloadFromDirectoryUri(directoryUri: Uri): JSONObject {
+        val viaTree = buildStudyFolderPayloadFromDirectoryAsTree(directoryUri)
+        if (viaTree.optBoolean("ok")) {
+            return viaTree
+        }
+
+        val viaDocument = buildStudyFolderPayloadFromDocumentUri(directoryUri)
+        if (viaDocument.optBoolean("ok")) {
+            return viaDocument
+        }
+
+        return if (viaDocument.optString("error").isNotBlank()) viaDocument else viaTree
+    }
+
+    private fun buildStudyFolderPayloadFromDirectoryAsTree(directoryUri: Uri): JSONObject {
+        return try {
+            val authority = directoryUri.authority
+            if (authority.isNullOrBlank()) {
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "folder_unavailable")
+            } else {
+                val documentId = DocumentsContract.getDocumentId(directoryUri)
+                val treeUri = DocumentsContract.buildTreeDocumentUri(authority, documentId)
+                try {
+                    contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: SecurityException) {
+                    // Provider may only grant one of document/tree URIs.
+                }
+                buildStudyFolderPayload(treeUri)
+            }
+        } catch (_: Exception) {
+            JSONObject()
+                .put("ok", false)
+                .put("error", "folder_unavailable")
+        }
+    }
+
+    private fun buildStudyFolderPayloadFromDocumentUri(directoryUri: Uri): JSONObject {
+        val authority = directoryUri.authority
+        if (authority.isNullOrBlank()) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "folder_unavailable")
+        }
+
+        val rootDocumentId = try {
+            DocumentsContract.getDocumentId(directoryUri)
+        } catch (_: Exception) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "folder_unavailable")
+        }
+
+        val files = JSONArray()
+        val nextNativeMap = mutableMapOf<String, Uri>()
+        val stack = ArrayDeque<Pair<String, String>>()
+        stack.add(rootDocumentId to "")
+
+        while (stack.isNotEmpty()) {
+            val (documentId, prefix) = stack.removeLast()
+            val childrenUri = DocumentsContract.buildChildDocumentsUri(authority, documentId)
+            val projection = arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE
+            )
+
+            val cursor = try {
+                contentResolver.query(childrenUri, projection, null, null, null)
+            } catch (_: Exception) {
+                null
+            } ?: continue
+
+            cursor.use {
+                val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                while (cursor.moveToNext()) {
+                    if (idIndex < 0 || nameIndex < 0 || mimeIndex < 0) {
+                        continue
+                    }
+                    val childId = cursor.getString(idIndex) ?: continue
+                    val name = cursor.getString(nameIndex) ?: continue
+                    val mimeType = cursor.getString(mimeIndex) ?: continue
+                    if (name.startsWith(".")) {
+                        continue
+                    }
+
+                    val path = if (prefix.isEmpty()) name else "$prefix/$name"
+                    val isDirectory =
+                        mimeType == DocumentsContract.Document.MIME_TYPE_DIR ||
+                            mimeType.equals("application/vnd.google-apps.folder", ignoreCase = true)
+                    if (isDirectory) {
+                        if (SKIP_DIRECTORIES.contains(name)) {
+                            continue
+                        }
+                        stack.add(childId to path)
+                        continue
+                    }
+
+                    val type = detectStudyType(name) ?: detectStudyTypeFromMime(mimeType) ?: continue
+                    val fileUri = DocumentsContract.buildDocumentUri(authority, childId)
+                    val id = UUID.randomUUID().toString()
+                    nextNativeMap[id] = fileUri
+                    files.put(
+                        JSONObject()
+                            .put("path", path)
+                            .put("name", name)
+                            .put("type", type)
+                            .put("url", "$NATIVE_FILE_BASE/$id")
+                    )
+                }
+            }
+        }
+
+        synchronized(nativeFileLock) {
+            nativeFileMap.clear()
+            nativeFileMap.putAll(nextNativeMap)
+        }
+
+        if (nextNativeMap.isEmpty()) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "no_supported_files")
+        }
+
+        return JSONObject()
+            .put("ok", true)
+            .put("count", nextNativeMap.size)
+            .put("files", files)
+    }
+
     private fun buildStudyFolderPayload(treeUri: Uri): JSONObject {
         val root = DocumentFile.fromTreeUri(this, treeUri)
         if (root == null || !root.isDirectory || !root.canRead()) {
@@ -453,7 +830,7 @@ class MainActivity : AppCompatActivity() {
         val targetUri = synchronized(nativeFileLock) { nativeFileMap[id] } ?: return emptyResponse(404, "Not Found")
 
         return try {
-            val stream = contentResolver.openInputStream(targetUri) ?: return emptyResponse(404, "Not Found")
+            val stream = openNativeInputStream(targetUri) ?: return emptyResponse(404, "Not Found")
             val mime = contentResolver.getType(targetUri) ?: guessMimeType(targetUri.toString())
             WebResourceResponse(mime, null, stream).apply {
                 setStatusCodeAndReasonPhrase(200, "OK")
@@ -464,6 +841,15 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (_: Exception) {
             emptyResponse(500, "Error")
+        }
+    }
+
+    private fun openNativeInputStream(uri: Uri): java.io.InputStream? {
+        return if (uri.scheme.equals("file", ignoreCase = true)) {
+            val path = uri.path ?: return null
+            FileInputStream(File(path))
+        } else {
+            contentResolver.openInputStream(uri)
         }
     }
 
