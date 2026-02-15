@@ -39,12 +39,18 @@
     </section>
 
     <main class="layout">
-      <aside class="sidebar">
-        <section class="panel filter-panel">
-          <h2>教材フィルタ</h2>
+        <aside class="sidebar">
+          <section class="panel filter-panel">
+          <div class="panel-title-row">
+            <h2>教材フィルタ</h2>
+            <button id="resetFiltersBtn" class="tiny" type="button" hidden>フィルタ解除</button>
+          </div>
           <label class="field">
             <span>検索</span>
-            <input id="searchInput" type="search" placeholder="例: 国民年金法 免除 スマート問題集">
+            <div class="search-row">
+              <input id="searchInput" type="search" placeholder="例: 国民年金法 免除 スマート問題集">
+              <button id="clearSearchBtn" class="tiny" type="button" hidden>クリア</button>
+            </div>
           </label>
           <label class="field">
             <span>種類</span>

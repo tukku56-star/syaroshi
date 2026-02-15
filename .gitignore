@@ -1,0 +1,28 @@
+# Study materials / exports (keep in Drive, don't commit)
+*.zip
+*.pdf
+phone_dump/
+study-sync-split/
+s-onei-goro_scrape/
+
+# Subject folders
+健康保険法/
+雇用保険法/
+厚生年金保険法/
+国民年金法/
+労働安全衛生法/
+労働一般常識/
+労働基準法/
+労働者災害補償保険法/
+労働保険徴収法/
+損と得のパラドックス/
+
+# Debug artifacts
+offline-study-android/*.xml
+offline-study-android/offline-study-android/
+offline-study-android/import_one_zip.ps1
+offline-study-android/verify_samples.ps1
+offline-study-app/qr-pages-url.png
+
+# Misc notes
+社労士小説.md

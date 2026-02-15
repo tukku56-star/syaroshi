@@ -85,6 +85,8 @@ function cacheElements() {
   el.installGuideText = document.getElementById("installGuideText");
   el.dismissInstallGuideBtn = document.getElementById("dismissInstallGuideBtn");
   el.searchInput = document.getElementById("searchInput");
+  el.clearSearchBtn = document.getElementById("clearSearchBtn");
+  el.resetFiltersBtn = document.getElementById("resetFiltersBtn");
   el.typeFilter = document.getElementById("typeFilter");
   el.subjectList = document.getElementById("subjectList");
   el.itemList = document.getElementById("itemList");
@@ -108,6 +110,12 @@ function bindEvents() {
   el.addFilesBtn.addEventListener("click", addFiles);
   el.refreshBtn.addEventListener("click", refreshScan);
   el.searchInput.addEventListener("input", onSearchInput);
+  if (el.clearSearchBtn) {
+    el.clearSearchBtn.addEventListener("click", clearSearch);
+  }
+  if (el.resetFiltersBtn) {
+    el.resetFiltersBtn.addEventListener("click", resetFilters);
+  }
   el.typeFilter.addEventListener("change", onTypeChange);
   el.subjectList.addEventListener("click", onSubjectSelect);
   el.itemList.addEventListener("click", onItemListClick);
@@ -178,6 +186,7 @@ function hydrateState() {
 
   el.typeFilter.value = state.selectedType;
   el.searchInput.value = state.query;
+  updateFilterButtons();
 }
 
 function hydrateNativeMap() {
@@ -248,12 +257,37 @@ function clearNativeMapStorage() {
 function onSearchInput() {
   state.query = el.searchInput.value;
   saveText(STORAGE_KEYS.query, state.query);
+  updateFilterButtons();
+  applyFilters();
+}
+
+function clearSearch() {
+  state.query = "";
+  saveText(STORAGE_KEYS.query, "");
+  el.searchInput.value = "";
+  updateFilterButtons();
+  applyFilters();
+  el.searchInput.focus();
+}
+
+function resetFilters() {
+  state.query = "";
+  state.selectedType = "all";
+  state.selectedSubject = "all";
+  saveText(STORAGE_KEYS.query, "");
+  saveText(STORAGE_KEYS.selectedType, "all");
+  saveText(STORAGE_KEYS.selectedSubject, "all");
+
+  el.searchInput.value = "";
+  el.typeFilter.value = "all";
+  updateFilterButtons();
   applyFilters();
 }
 
 function onTypeChange() {
   state.selectedType = el.typeFilter.value;
   saveText(STORAGE_KEYS.selectedType, state.selectedType);
+  updateFilterButtons();
   applyFilters();
 }
 
@@ -265,6 +299,7 @@ function onSubjectSelect(event) {
 
   state.selectedSubject = target.dataset.subject || "all";
   saveText(STORAGE_KEYS.selectedSubject, state.selectedSubject);
+  updateFilterButtons();
   applyFilters();
 }
 
@@ -811,6 +846,17 @@ function applyFilters() {
 
   renderSubjectList();
   renderItemList();
+  updateFilterButtons();
+}
+
+function updateFilterButtons() {
+  if (el.clearSearchBtn) {
+    el.clearSearchBtn.hidden = !state.query;
+  }
+  if (el.resetFiltersBtn) {
+    const active = Boolean(state.query) || state.selectedType !== "all" || state.selectedSubject !== "all";
+    el.resetFiltersBtn.hidden = !active;
+  }
 }
 
 function renderSubjectList() {

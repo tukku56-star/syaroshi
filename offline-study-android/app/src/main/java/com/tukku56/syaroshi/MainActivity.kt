@@ -42,6 +42,9 @@ class MainActivity : AppCompatActivity() {
     private val pdfLaunchLock = Any()
     private var lastPdfLaunchId: String = ""
     private var lastPdfLaunchAtMs: Long = 0L
+    private val zipImportLock = Any()
+    private var lastZipImportUri: String = ""
+    private var lastZipImportAtMs: Long = 0L
     private var cachedNativePayload: JSONObject? = null
     private var restoredPayloadDispatched = false
 
@@ -102,6 +105,9 @@ class MainActivity : AppCompatActivity() {
             webView.loadUrl(APP_URL)
         }
 
+        // Support importing a ZIP via "Open with"/"Share" intents (e.g., from Google Drive).
+        maybeImportZipFromIntent(intent)
+
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
@@ -114,6 +120,15 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent == null) {
+            return
+        }
+        setIntent(intent)
+        maybeImportZipFromIntent(intent)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -257,6 +272,82 @@ class MainActivity : AppCompatActivity() {
             val payload = buildStudyFolderPayloadFromZip(zipUri)
             runOnUiThread { dispatchNativeFolderPayload(payload) }
         }.start()
+    }
+
+    private fun maybeImportZipFromIntent(intent: Intent?) {
+        if (intent == null) {
+            return
+        }
+
+        val zipUri = extractZipUriFromIntent(intent) ?: return
+        val key = zipUri.toString()
+        if (key.isBlank()) {
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        synchronized(zipImportLock) {
+            // Prevent accidental re-imports caused by configuration changes or repeated intent delivery.
+            if (key == lastZipImportUri && now - lastZipImportAtMs < 30_000) {
+                return
+            }
+            lastZipImportUri = key
+            lastZipImportAtMs = now
+        }
+
+        try {
+            contentResolver.takePersistableUriPermission(zipUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+            // Most share/view flows grant temporary permission only.
+        }
+
+        Thread {
+            val payload = buildStudyFolderPayloadFromZip(zipUri)
+            runOnUiThread { dispatchNativeFolderPayload(payload) }
+        }.start()
+    }
+
+    private fun extractZipUriFromIntent(intent: Intent): Uri? {
+        val action = intent.action ?: return null
+        val hintMime = intent.type
+
+        val candidates = mutableListOf<Uri>()
+        when (action) {
+            Intent.ACTION_VIEW -> {
+                val uri = intent.data ?: return null
+                candidates.add(uri)
+            }
+
+            Intent.ACTION_SEND -> {
+                @Suppress("DEPRECATION")
+                val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return null
+                candidates.add(uri)
+            }
+
+            Intent.ACTION_SEND_MULTIPLE -> {
+                @Suppress("DEPRECATION")
+                val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: return null
+                candidates.addAll(uris)
+            }
+
+            else -> return null
+        }
+
+        for (uri in candidates) {
+            if (isZipUri(uri, hintMime)) {
+                return uri
+            }
+        }
+        return null
+    }
+
+    private fun isZipUri(uri: Uri, hintMime: String?): Boolean {
+        val name = resolveDisplayName(uri)
+        if (name.lowercase(Locale.US).endsWith(".zip")) {
+            return true
+        }
+        val mime = (hintMime ?: contentResolver.getType(uri) ?: "").lowercase(Locale.US)
+        return mime == "application/zip" || mime == "application/x-zip-compressed"
     }
 
     private fun showStudySourceChooser() {
@@ -507,8 +598,26 @@ class MainActivity : AppCompatActivity() {
                 .put("error", "zip_unavailable")
         }
 
-        val files = JSONArray()
-        val nextNativeMap = mutableMapOf<String, Uri>()
+        val mergedFilesByPath = LinkedHashMap<String, JSONObject>()
+        val existingPayload = cachedNativePayload
+        if (existingPayload != null && existingPayload.optBoolean("ok")) {
+            val existingFiles = existingPayload.optJSONArray("files")
+            if (existingFiles != null) {
+                for (i in 0 until existingFiles.length()) {
+                    val row = existingFiles.optJSONObject(i) ?: continue
+                    val path = row.optString("path", "").trim()
+                    val url = row.optString("url", "").trim()
+                    val type = row.optString("type", "").trim()
+                    if (path.isBlank() || url.isBlank() || type.isBlank()) {
+                        continue
+                    }
+                    mergedFilesByPath[path] = row
+                }
+            }
+        }
+
+        val existingNativeSnapshot: Map<String, Uri> = synchronized(nativeFileLock) { nativeFileMap.toMap() }
+        val extractedIdToUri = mutableMapOf<String, Uri>()
         val rootCanonical = try {
             rootDir.canonicalFile
         } catch (_: Exception) {
@@ -518,7 +627,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
-            val input = contentResolver.openInputStream(zipUri) ?: return JSONObject()
+            val input = openNativeInputStream(zipUri) ?: return JSONObject()
                 .put("ok", false)
                 .put("error", "zip_unavailable")
 
@@ -537,7 +646,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     val fileName = relativePath.substringAfterLast('/')
-                    if (shouldSkipAudio(fileName)) {
+                    if (shouldSkipAudio(relativePath) || shouldSkipAudio(fileName)) {
                         zip.closeEntry()
                         continue
                     }
@@ -564,15 +673,16 @@ class MainActivity : AppCompatActivity() {
                         zip.copyTo(output)
                     }
 
-                    val id = UUID.randomUUID().toString()
-                    nextNativeMap[id] = Uri.fromFile(outCanonical)
-                    files.put(
+                    val existingId =
+                        mergedFilesByPath[relativePath]?.optString("url")?.let { extractNativeFileId(it) }
+                    val id = if (!existingId.isNullOrBlank()) existingId else UUID.randomUUID().toString()
+                    extractedIdToUri[id] = Uri.fromFile(outCanonical)
+                    mergedFilesByPath[relativePath] =
                         JSONObject()
                             .put("path", relativePath)
                             .put("name", fileName)
                             .put("type", type)
                             .put("url", "$NATIVE_FILE_BASE/$id")
-                    )
                     zip.closeEntry()
                 }
             }
@@ -582,25 +692,53 @@ class MainActivity : AppCompatActivity() {
                 .put("error", "zip_unavailable")
         }
 
-        if (nextNativeMap.isEmpty()) {
+        if (mergedFilesByPath.isEmpty()) {
             return JSONObject()
                 .put("ok", false)
                 .put("error", "no_supported_files")
         }
-        replaceNativeState(nextNativeMap, files)
+
+        val usedIds = mutableSetOf<String>()
+        val mergedFiles = JSONArray()
+        for ((_, row) in mergedFilesByPath) {
+            val url = row.optString("url", "")
+            val id = extractNativeFileId(url)
+            if (!id.isNullOrBlank()) {
+                usedIds.add(id)
+            }
+            mergedFiles.put(row)
+        }
+        if (usedIds.isEmpty()) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "no_supported_files")
+        }
+
+        val nextNativeMap = mutableMapOf<String, Uri>()
+        for (id in usedIds) {
+            val uri = extractedIdToUri[id] ?: existingNativeSnapshot[id] ?: continue
+            nextNativeMap[id] = uri
+        }
+        if (nextNativeMap.isEmpty()) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "zip_unavailable")
+        }
+        replaceNativeState(nextNativeMap, mergedFiles)
 
         return JSONObject()
             .put("ok", true)
             .put("count", nextNativeMap.size)
-            .put("files", files)
+            .put("files", mergedFiles)
     }
 
     private fun prepareSyncDirectory(rootDir: File): Boolean {
         return try {
             if (rootDir.exists()) {
-                rootDir.deleteRecursively()
+                rootDir.isDirectory
+            } else {
+                rootDir.mkdirs()
             }
-            rootDir.mkdirs()
         } catch (_: Exception) {
             false
         }
