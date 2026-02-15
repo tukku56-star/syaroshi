@@ -1,6 +1,6 @@
 {
-  "name": "社労士オフライン学習アプリ",
-  "short_name": "社労士学習",
+  "name": "社労士オフライン学習",
+  "short_name": "社労士オフライン学習",
   "lang": "ja",
   "start_url": "./index.html",
   "scope": "./",
