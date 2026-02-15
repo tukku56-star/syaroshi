@@ -449,6 +449,26 @@ textarea:focus {
   background: #fff;
 }
 
+.group-header {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.5rem 0.65rem;
+  font-weight: 800;
+  font-size: 0.86rem;
+  letter-spacing: 0.02em;
+}
+
+.group-header.group-subject {
+  background: linear-gradient(90deg, #fff7ed, #ffffff);
+  color: var(--ink);
+}
+
+.group-header.group-material {
+  background: var(--accent-soft);
+  border-color: rgba(15, 118, 110, 0.28);
+  color: var(--accent);
+}
+
 @media (max-width: 1260px) {
   .layout {
     grid-template-columns: 1fr;

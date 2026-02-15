@@ -6,6 +6,7 @@ const STORAGE_KEYS = {
   doneByDate: "sharoushi.offline.doneByDate",
   memos: "sharoushi.offline.memos",
   selectedType: "sharoushi.offline.selectedType",
+  selectedMaterial: "sharoushi.offline.selectedMaterial",
   selectedSubject: "sharoushi.offline.selectedSubject",
   query: "sharoushi.offline.query",
   installGuideDismissed: "sharoushi.offline.installGuideDismissed",
@@ -33,6 +34,7 @@ const state = {
   doneByDate: {},
   memos: {},
   selectedType: "all",
+  selectedMaterial: "all",
   selectedSubject: "all",
   query: "",
   rootHandle: null,
@@ -88,6 +90,7 @@ function cacheElements() {
   el.clearSearchBtn = document.getElementById("clearSearchBtn");
   el.resetFiltersBtn = document.getElementById("resetFiltersBtn");
   el.typeFilter = document.getElementById("typeFilter");
+  el.materialFilter = document.getElementById("materialFilter");
   el.subjectList = document.getElementById("subjectList");
   el.itemList = document.getElementById("itemList");
   el.itemCount = document.getElementById("itemCount");
@@ -117,6 +120,9 @@ function bindEvents() {
     el.resetFiltersBtn.addEventListener("click", resetFilters);
   }
   el.typeFilter.addEventListener("change", onTypeChange);
+  if (el.materialFilter) {
+    el.materialFilter.addEventListener("change", onMaterialChange);
+  }
   el.subjectList.addEventListener("click", onSubjectSelect);
   el.itemList.addEventListener("click", onItemListClick);
   el.queueList.addEventListener("click", onQueueClick);
@@ -170,6 +176,11 @@ function hydrateState() {
     state.selectedType = "all";
   }
 
+  state.selectedMaterial = loadText(STORAGE_KEYS.selectedMaterial, "all");
+  if (!state.selectedMaterial) {
+    state.selectedMaterial = "all";
+  }
+
   state.selectedSubject = loadText(STORAGE_KEYS.selectedSubject, "all");
   state.query = loadText(STORAGE_KEYS.query, "");
   state.installGuideDismissed = loadText(STORAGE_KEYS.installGuideDismissed, "") === "1";
@@ -185,6 +196,13 @@ function hydrateState() {
   syncNativeMapToLibrary();
 
   el.typeFilter.value = state.selectedType;
+  if (el.materialFilter) {
+    const allowed = new Set(Array.from(el.materialFilter.options || []).map((opt) => String(opt.value || "")));
+    if (!allowed.has(state.selectedMaterial)) {
+      state.selectedMaterial = "all";
+    }
+    el.materialFilter.value = state.selectedMaterial;
+  }
   el.searchInput.value = state.query;
   updateFilterButtons();
 }
@@ -273,13 +291,18 @@ function clearSearch() {
 function resetFilters() {
   state.query = "";
   state.selectedType = "all";
+  state.selectedMaterial = "all";
   state.selectedSubject = "all";
   saveText(STORAGE_KEYS.query, "");
   saveText(STORAGE_KEYS.selectedType, "all");
+  saveText(STORAGE_KEYS.selectedMaterial, "all");
   saveText(STORAGE_KEYS.selectedSubject, "all");
 
   el.searchInput.value = "";
   el.typeFilter.value = "all";
+  if (el.materialFilter) {
+    el.materialFilter.value = "all";
+  }
   updateFilterButtons();
   applyFilters();
 }
@@ -287,6 +310,16 @@ function resetFilters() {
 function onTypeChange() {
   state.selectedType = el.typeFilter.value;
   saveText(STORAGE_KEYS.selectedType, state.selectedType);
+  updateFilterButtons();
+  applyFilters();
+}
+
+function onMaterialChange() {
+  if (!el.materialFilter) {
+    return;
+  }
+  state.selectedMaterial = el.materialFilter.value || "all";
+  saveText(STORAGE_KEYS.selectedMaterial, state.selectedMaterial);
   updateFilterButtons();
   applyFilters();
 }
@@ -824,6 +857,9 @@ function applyFilters() {
     if (state.selectedType !== "all" && item.type !== state.selectedType) {
       continue;
     }
+    if (state.selectedMaterial !== "all" && item.material !== state.selectedMaterial) {
+      continue;
+    }
     if (query && !item.searchable.includes(query)) {
       continue;
     }
@@ -854,7 +890,11 @@ function updateFilterButtons() {
     el.clearSearchBtn.hidden = !state.query;
   }
   if (el.resetFiltersBtn) {
-    const active = Boolean(state.query) || state.selectedType !== "all" || state.selectedSubject !== "all";
+    const active =
+      Boolean(state.query) ||
+      state.selectedType !== "all" ||
+      state.selectedMaterial !== "all" ||
+      state.selectedSubject !== "all";
     el.resetFiltersBtn.hidden = !active;
   }
 }
@@ -907,6 +947,16 @@ function renderItemList() {
   const doneMap = ensureTodayDoneMap();
   const fragment = document.createDocumentFragment();
 
+  const subjectTotals = new Map();
+  const materialTotals = new Map();
+  const subjectMaterialTotals = new Map();
+  for (const item of state.filtered) {
+    subjectTotals.set(item.subject, (subjectTotals.get(item.subject) || 0) + 1);
+    materialTotals.set(item.material, (materialTotals.get(item.material) || 0) + 1);
+    const key = `${item.subject}\t${item.material}`;
+    subjectMaterialTotals.set(key, (subjectMaterialTotals.get(key) || 0) + 1);
+  }
+
   if (state.filtered.length > MAX_RENDER_ITEMS) {
     const hint = document.createElement("li");
     hint.className = "hint";
@@ -914,7 +964,25 @@ function renderItemList() {
     fragment.appendChild(hint);
   }
 
+  const groupBySubject = state.selectedSubject === "all";
+  const groupByMaterial = state.selectedMaterial === "all";
+  let currentSubject = "";
+  let currentMaterial = "";
+
   for (const item of state.filtered.slice(0, MAX_RENDER_ITEMS)) {
+    if (groupBySubject && item.subject !== currentSubject) {
+      currentSubject = item.subject;
+      currentMaterial = "";
+      fragment.appendChild(createGroupHeader("subject", item.subject, subjectTotals.get(item.subject) || 0));
+    }
+    if (groupByMaterial && item.material !== currentMaterial) {
+      currentMaterial = item.material;
+      const count = groupBySubject
+        ? subjectMaterialTotals.get(`${item.subject}\t${item.material}`) || 0
+        : materialTotals.get(item.material) || 0;
+      fragment.appendChild(createGroupHeader("material", item.material, count));
+    }
+
     const card = document.createElement("li");
     card.className = "item-card";
     if (state.currentPath === item.path) {
@@ -980,6 +1048,13 @@ function renderItemList() {
   }
 
   el.itemList.appendChild(fragment);
+}
+
+function createGroupHeader(kind, label, count) {
+  const li = document.createElement("li");
+  li.className = `group-header group-${kind}`;
+  li.textContent = count ? `${label} (${count})` : label;
+  return li;
 }
 
 function renderQueue() {
