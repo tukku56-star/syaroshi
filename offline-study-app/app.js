@@ -1333,13 +1333,87 @@ function ensureTodayDoneMap() {
   return state.doneByDate[key];
 }
 
+function toHalfWidthDigits(value) {
+  return String(value || "").replace(/[０-９]/g, (ch) =>
+    String.fromCharCode(ch.charCodeAt(0) - 0xfee0)
+  );
+}
+
+function tokenizeNatural(value) {
+  const text = toHalfWidthDigits(value);
+  const tokens = [];
+  const re = /(\d+)/g;
+  let last = 0;
+  while (true) {
+    const match = re.exec(text);
+    if (!match) {
+      break;
+    }
+    if (match.index > last) {
+      tokens.push({ type: "text", value: text.slice(last, match.index) });
+    }
+    const raw = match[1];
+    tokens.push({ type: "num", value: raw, num: Number.parseInt(raw, 10) });
+    last = match.index + raw.length;
+  }
+  if (last < text.length) {
+    tokens.push({ type: "text", value: text.slice(last) });
+  }
+  return tokens;
+}
+
+function naturalCompare(a, b, locale) {
+  const left = tokenizeNatural(a);
+  const right = tokenizeNatural(b);
+  const max = Math.max(left.length, right.length);
+
+  for (let i = 0; i < max; i += 1) {
+    const l = left[i];
+    const r = right[i];
+    if (!l && !r) {
+      return 0;
+    }
+    if (!l) {
+      return -1;
+    }
+    if (!r) {
+      return 1;
+    }
+
+    if (l.type !== r.type) {
+      // Put numbers before text at the same position.
+      return l.type === "num" ? -1 : 1;
+    }
+
+    if (l.type === "num") {
+      const diff = (l.num || 0) - (r.num || 0);
+      if (diff) {
+        return diff;
+      }
+      // If numeric value is the same, shorter token first (e.g. 2 < 02).
+      const lenDiff = l.value.length - r.value.length;
+      if (lenDiff) {
+        return lenDiff;
+      }
+      continue;
+    }
+
+    const textDiff = l.value.localeCompare(r.value, locale);
+    if (textDiff) {
+      return textDiff;
+    }
+  }
+
+  return String(a || "").localeCompare(String(b || ""), locale);
+}
+
 function compareItems(a, b) {
   return (
-    a.subject.localeCompare(b.subject, "ja") ||
-    a.material.localeCompare(b.material, "ja") ||
-    a.type.localeCompare(b.type, "ja") ||
-    a.name.localeCompare(b.name, "ja") ||
-    a.path.localeCompare(b.path, "ja")
+    naturalCompare(a.subject, b.subject, "ja") ||
+    naturalCompare(a.material, b.material, "ja") ||
+    naturalCompare(a.type, b.type, "ja") ||
+    naturalCompare(a.name, b.name, "ja") ||
+    naturalCompare(a.path, b.path, "ja")
   );
 }
 
