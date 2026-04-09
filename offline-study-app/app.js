@@ -5,6 +5,8 @@ const STORAGE_KEYS = {
   queue: "sharoushi.offline.queue",
   doneByDate: "sharoushi.offline.doneByDate",
   memos: "sharoushi.offline.memos",
+  studyTimeByDate: "sharoushi.offline.studyTimeByDate",
+  studySession: "sharoushi.offline.studySession",
   selectedType: "sharoushi.offline.selectedType",
   selectedMaterial: "sharoushi.offline.selectedMaterial",
   selectedSubject: "sharoushi.offline.selectedSubject",
@@ -23,6 +25,7 @@ const SKIP_DIRECTORIES = new Set([".git", "offline-study-app", "node_modules"]);
 const MAX_RENDER_ITEMS = 350;
 const VIEWER_PLACEHOLDER_DEFAULT_TITLE = "教材を選択してください";
 const VIEWER_PLACEHOLDER_DEFAULT_TEXT = "PDFは右側で閲覧、音声はそのまま再生できます。今日のキューに追加すると進捗管理しやすくなります。";
+const STUDY_TICK_MS = 1000;
 
 const state = {
   library: [],
@@ -33,6 +36,8 @@ const state = {
   queue: [],
   doneByDate: {},
   memos: {},
+  studyTimeByDate: {},
+  studySession: createEmptyStudySession(),
   selectedType: "all",
   selectedMaterial: "all",
   selectedSubject: "all",
@@ -49,6 +54,7 @@ const state = {
 let pendingNativeFolderResolve = null;
 let pendingNativeFolderTimer = null;
 const NATIVE_PICK_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+let studyTickTimer = 0;
 
 const el = {};
 
@@ -62,6 +68,8 @@ async function init() {
   applyFilters();
   renderQueue();
   updateMemoAvailability();
+  updateStudyPanel();
+  syncStudyTicker();
 
   const nativeFolderSupported = supportsNativeFolderPicker();
   if (!nativeFolderSupported && !supportsDirectoryPicker() && !supportsDirectoryUpload()) {
@@ -102,6 +110,13 @@ function cacheElements() {
   el.audioWrap = document.getElementById("audioWrap");
   el.audioTitle = document.getElementById("audioTitle");
   el.audioPlayer = document.getElementById("audioPlayer");
+  el.studyTodayTotal = document.getElementById("studyTodayTotal");
+  el.studySessionTime = document.getElementById("studySessionTime");
+  el.studyCurrentItemTotal = document.getElementById("studyCurrentItemTotal");
+  el.studyTarget = document.getElementById("studyTarget");
+  el.toggleStudyBtn = document.getElementById("toggleStudyBtn");
+  el.resetStudyTodayBtn = document.getElementById("resetStudyTodayBtn");
+  el.studyRecentList = document.getElementById("studyRecentList");
   el.memoInput = document.getElementById("memoInput");
   el.saveMemoBtn = document.getElementById("saveMemoBtn");
   el.folderInput = document.getElementById("folderInput");
@@ -127,6 +142,8 @@ function bindEvents() {
   el.itemList.addEventListener("click", onItemListClick);
   el.queueList.addEventListener("click", onQueueClick);
   el.clearDoneBtn.addEventListener("click", clearTodayDone);
+  el.toggleStudyBtn.addEventListener("click", toggleStudyTimer);
+  el.resetStudyTodayBtn.addEventListener("click", resetTodayStudyTime);
   el.saveMemoBtn.addEventListener("click", () => saveCurrentMemo(true));
   el.memoInput.addEventListener("blur", () => saveCurrentMemo(false));
   el.folderInput.addEventListener("change", onFolderChosen);
@@ -171,6 +188,9 @@ function hydrateState() {
     state.memos = {};
   }
 
+  state.studyTimeByDate = normalizeStudyTimeByDate(loadJson(STORAGE_KEYS.studyTimeByDate, {}));
+  state.studySession = normalizeStudySession(loadJson(STORAGE_KEYS.studySession, createEmptyStudySession()));
+
   state.selectedType = loadText(STORAGE_KEYS.selectedType, "all");
   if (!["all", "pdf", "audio"].includes(state.selectedType)) {
     state.selectedType = "all";
@@ -194,6 +214,10 @@ function hydrateState() {
   rebuildLibraryMap();
   hydrateNativeMap();
   syncNativeMapToLibrary();
+  if (state.studySession.active && state.libraryMap.size && !state.libraryMap.has(state.studySession.path)) {
+    state.studySession = createEmptyStudySession();
+    saveJson(STORAGE_KEYS.studySession, state.studySession);
+  }
 
   el.typeFilter.value = state.selectedType;
   if (el.materialFilter) {
@@ -739,6 +763,7 @@ function setLibrary(nextLibrary, persist) {
   pruneQueueAndDone();
   applyFilters();
   renderQueue();
+  updateStudyPanel();
 
   if (persist) {
     saveJson(STORAGE_KEYS.library, state.library);
@@ -945,6 +970,7 @@ function renderItemList() {
 
   const queueSet = new Set(state.queue);
   const doneMap = ensureTodayDoneMap();
+  const todayStudyByPath = buildStudyPathLookupForDay(todayKey());
   const fragment = document.createDocumentFragment();
 
   const subjectTotals = new Map();
@@ -1022,6 +1048,14 @@ function renderItemList() {
     pathTag.textContent = item.path;
     tags.appendChild(pathTag);
 
+    const studyMs = todayStudyByPath.get(item.path) || 0;
+    if (studyMs > 0) {
+      const studyTag = document.createElement("span");
+      studyTag.className = "tag";
+      studyTag.textContent = `今日 ${formatDurationCompact(studyMs)}`;
+      tags.appendChild(studyTag);
+    }
+
     const actions = document.createElement("div");
     actions.className = "item-actions";
 
@@ -1060,6 +1094,7 @@ function createGroupHeader(kind, label, count) {
 function renderQueue() {
   el.queueList.textContent = "";
   const doneMap = ensureTodayDoneMap();
+  const todayStudyByPath = buildStudyPathLookupForDay(todayKey());
   let doneCount = 0;
 
   for (const path of state.queue) {
@@ -1108,6 +1143,14 @@ function renderQueue() {
       meta.className = "meta";
       meta.textContent = `${item.subject} / ${item.material}`;
       titleButton.appendChild(meta);
+
+      const studyMs = todayStudyByPath.get(path) || 0;
+      if (studyMs > 0) {
+        const studyMeta = document.createElement("p");
+        studyMeta.className = "meta";
+        studyMeta.textContent = `今日の学習 ${formatDurationCompact(studyMs)}`;
+        titleButton.appendChild(studyMeta);
+      }
     }
 
     const actions = document.createElement("div");
@@ -1139,6 +1182,450 @@ function createSmallButton(label, action, path) {
   return button;
 }
 
+function createEmptyStudySession() {
+  return {
+    active: false,
+    path: "",
+    subject: "",
+    name: "",
+    startedAt: 0
+  };
+}
+
+function normalizeStudyTimeByDate(raw) {
+  if (!isPlainObject(raw)) {
+    return {};
+  }
+
+  const output = {};
+  for (const [dayKey, row] of Object.entries(raw)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey) || !isPlainObject(row)) {
+      continue;
+    }
+
+    const subjects = {};
+    const items = {};
+
+    if (isPlainObject(row.subjects)) {
+      for (const [subject, ms] of Object.entries(row.subjects)) {
+        const safeMs = normalizeDurationMs(ms);
+        if (safeMs > 0) {
+          subjects[subject] = safeMs;
+        }
+      }
+    }
+
+    if (isPlainObject(row.items)) {
+      for (const [path, ms] of Object.entries(row.items)) {
+        const safeMs = normalizeDurationMs(ms);
+        if (safeMs > 0) {
+          items[path] = safeMs;
+        }
+      }
+    }
+
+    output[dayKey] = {
+      totalMs: normalizeDurationMs(row.totalMs),
+      subjects,
+      items
+    };
+  }
+
+  return output;
+}
+
+function normalizeStudySession(raw) {
+  if (!isPlainObject(raw)) {
+    return createEmptyStudySession();
+  }
+
+  const active = raw.active === true;
+  const path = String(raw.path || "").trim();
+  const subject = String(raw.subject || "").trim();
+  const name = String(raw.name || "").trim();
+  const startedAt = Number.isFinite(raw.startedAt) ? Math.max(0, Math.floor(raw.startedAt)) : 0;
+
+  if (!active || !path || !subject || !name || startedAt <= 0) {
+    return createEmptyStudySession();
+  }
+
+  return {
+    active: true,
+    path,
+    subject,
+    name,
+    startedAt
+  };
+}
+
+function normalizeDurationMs(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
+function ensureStudyDayRecord(dayKey) {
+  if (!isPlainObject(state.studyTimeByDate[dayKey])) {
+    state.studyTimeByDate[dayKey] = {
+      totalMs: 0,
+      subjects: {},
+      items: {}
+    };
+  }
+
+  const record = state.studyTimeByDate[dayKey];
+  if (!isPlainObject(record.subjects)) {
+    record.subjects = {};
+  }
+  if (!isPlainObject(record.items)) {
+    record.items = {};
+  }
+  record.totalMs = normalizeDurationMs(record.totalMs);
+  return record;
+}
+
+function splitStudySpanByDay(startedAt, endedAt) {
+  const chunks = [];
+  let cursor = normalizeDurationMs(startedAt);
+  const finalAt = normalizeDurationMs(endedAt);
+  if (finalAt <= cursor) {
+    return chunks;
+  }
+
+  while (cursor < finalAt) {
+    const dayKey = dayKeyFromTimestamp(cursor);
+    const nextBoundary = startOfNextDayTimestamp(cursor);
+    const chunkEnd = Math.min(finalAt, nextBoundary);
+    chunks.push({
+      dayKey,
+      ms: chunkEnd - cursor
+    });
+    cursor = chunkEnd;
+  }
+
+  return chunks;
+}
+
+function getActiveStudyChunks(now = Date.now()) {
+  if (!state.studySession.active || !state.studySession.startedAt) {
+    return [];
+  }
+  return splitStudySpanByDay(state.studySession.startedAt, now);
+}
+
+function getStudySessionElapsedMs(now = Date.now()) {
+  if (!state.studySession.active || !state.studySession.startedAt) {
+    return 0;
+  }
+  return Math.max(0, now - state.studySession.startedAt);
+}
+
+function buildStudyPathLookupForDay(dayKey, now = Date.now()) {
+  const output = new Map();
+  const record = state.studyTimeByDate[dayKey];
+  if (record && isPlainObject(record.items)) {
+    for (const [path, ms] of Object.entries(record.items)) {
+      const safeMs = normalizeDurationMs(ms);
+      if (safeMs > 0) {
+        output.set(path, safeMs);
+      }
+    }
+  }
+
+  if (state.studySession.active && state.studySession.path) {
+    for (const chunk of getActiveStudyChunks(now)) {
+      if (chunk.dayKey !== dayKey) {
+        continue;
+      }
+      output.set(
+        state.studySession.path,
+        (output.get(state.studySession.path) || 0) + chunk.ms
+      );
+    }
+  }
+
+  return output;
+}
+
+function getStudyTotalMsForDay(dayKey, now = Date.now()) {
+  const record = state.studyTimeByDate[dayKey];
+  let totalMs = record ? normalizeDurationMs(record.totalMs) : 0;
+
+  if (state.studySession.active) {
+    for (const chunk of getActiveStudyChunks(now)) {
+      if (chunk.dayKey === dayKey) {
+        totalMs += chunk.ms;
+      }
+    }
+  }
+
+  return totalMs;
+}
+
+function recordStudyChunk(dayKey, session, ms) {
+  const safeMs = normalizeDurationMs(ms);
+  if (safeMs <= 0 || !session || !session.path || !session.subject) {
+    return;
+  }
+
+  const record = ensureStudyDayRecord(dayKey);
+  record.totalMs += safeMs;
+  record.subjects[session.subject] = normalizeDurationMs(record.subjects[session.subject]) + safeMs;
+  record.items[session.path] = normalizeDurationMs(record.items[session.path]) + safeMs;
+}
+
+function commitStudySession(endedAt = Date.now()) {
+  const session = state.studySession;
+  if (!session.active || !session.startedAt) {
+    return 0;
+  }
+
+  const chunks = splitStudySpanByDay(session.startedAt, endedAt);
+  let savedMs = 0;
+  for (const chunk of chunks) {
+    recordStudyChunk(chunk.dayKey, session, chunk.ms);
+    savedMs += chunk.ms;
+  }
+  saveJson(STORAGE_KEYS.studyTimeByDate, state.studyTimeByDate);
+  return savedMs;
+}
+
+function startStudySessionForItem(item, startedAt = Date.now()) {
+  if (!item) {
+    return;
+  }
+
+  state.studySession = {
+    active: true,
+    path: item.path,
+    subject: item.subject,
+    name: item.name,
+    startedAt: normalizeDurationMs(startedAt) || Date.now()
+  };
+  saveJson(STORAGE_KEYS.studySession, state.studySession);
+  syncStudyTicker();
+  updateStudyPanel();
+  renderItemList();
+  renderQueue();
+}
+
+function clearStudySession() {
+  state.studySession = createEmptyStudySession();
+  saveJson(STORAGE_KEYS.studySession, state.studySession);
+  syncStudyTicker();
+}
+
+function stopStudySession(notify) {
+  const savedMs = commitStudySession(Date.now());
+  clearStudySession();
+  updateStudyPanel();
+  renderItemList();
+  renderQueue();
+  if (notify) {
+    if (savedMs > 0) {
+      setStatus(`学習時間を記録しました: ${formatDurationCompact(savedMs)}`);
+    } else {
+      setStatus("学習時間の記録を停止しました。");
+    }
+  }
+}
+
+function restartStudySessionForItem(item) {
+  commitStudySession(Date.now());
+  startStudySessionForItem(item, Date.now());
+}
+
+function toggleStudyTimer() {
+  if (state.studySession.active) {
+    stopStudySession(true);
+    return;
+  }
+
+  const item = state.currentPath ? state.libraryMap.get(state.currentPath) : null;
+  if (!item) {
+    setStatus("教材を開いてから記録開始してください。", "warn");
+    return;
+  }
+
+  startStudySessionForItem(item, Date.now());
+  setStatus(`学習時間の記録を開始: ${item.subject} / ${item.name}`);
+}
+
+function resetTodayStudyTime() {
+  const key = todayKey();
+  delete state.studyTimeByDate[key];
+
+  if (state.studySession.active) {
+    state.studySession.startedAt = Date.now();
+    saveJson(STORAGE_KEYS.studySession, state.studySession);
+  }
+
+  saveJson(STORAGE_KEYS.studyTimeByDate, state.studyTimeByDate);
+  updateStudyPanel();
+  renderItemList();
+  renderQueue();
+  setStatus("今日の学習時間をリセットしました。");
+}
+
+function syncStudyTicker() {
+  if (studyTickTimer) {
+    clearInterval(studyTickTimer);
+    studyTickTimer = 0;
+  }
+
+  if (!state.studySession.active) {
+    updateStudyPanel();
+    return;
+  }
+
+  studyTickTimer = window.setInterval(() => {
+    updateStudyPanel();
+  }, STUDY_TICK_MS);
+  updateStudyPanel();
+}
+
+function updateStudyPanel() {
+  if (!el.studyTodayTotal || !el.studySessionTime || !el.studyCurrentItemTotal || !el.studyTarget) {
+    return;
+  }
+
+  const now = Date.now();
+  const today = todayKey();
+  const currentItem = state.currentPath ? state.libraryMap.get(state.currentPath) : null;
+  const sessionItem = state.studySession.active && state.studySession.path
+    ? state.libraryMap.get(state.studySession.path) || state.studySession
+    : null;
+  const targetItem = state.studySession.active ? sessionItem : currentItem;
+  const todayStudyByPath = buildStudyPathLookupForDay(today, now);
+  const todayTotalMs = getStudyTotalMsForDay(today, now);
+  const currentItemMs = targetItem ? (todayStudyByPath.get(targetItem.path) || 0) : 0;
+
+  el.studyTodayTotal.textContent = `今日 ${formatDurationClock(todayTotalMs)}`;
+  el.studySessionTime.textContent = formatDurationClock(getStudySessionElapsedMs(now));
+  el.studySessionTime.classList.toggle("is-live", state.studySession.active);
+  el.studyCurrentItemTotal.textContent = formatDurationClock(currentItemMs);
+
+  if (state.studySession.active && targetItem) {
+    el.studyTarget.textContent = `記録中: ${targetItem.subject} / ${targetItem.name}`;
+  } else if (currentItem) {
+    el.studyTarget.textContent = `選択中: ${currentItem.subject} / ${currentItem.name}`;
+  } else {
+    el.studyTarget.textContent = "教材を開いてから記録開始できます。";
+  }
+
+  if (el.toggleStudyBtn) {
+    el.toggleStudyBtn.disabled = !state.studySession.active && !currentItem;
+    el.toggleStudyBtn.textContent = state.studySession.active ? "記録停止" : "記録開始";
+    el.toggleStudyBtn.classList.toggle("is-recording", state.studySession.active);
+  }
+  if (el.resetStudyTodayBtn) {
+    el.resetStudyTodayBtn.disabled = todayTotalMs <= 0;
+  }
+
+  renderStudyRecentList(now);
+}
+
+function renderStudyRecentList(now = Date.now()) {
+  if (!el.studyRecentList) {
+    return;
+  }
+
+  el.studyRecentList.textContent = "";
+  const rows = [];
+  for (let i = 0; i < 7; i += 1) {
+    const dayKey = offsetDayKey(-i, now);
+    const totalMs = getStudyTotalMsForDay(dayKey, now);
+    if (i === 0 || totalMs > 0) {
+      rows.push({ dayKey, totalMs });
+    }
+  }
+
+  if (rows.length === 1 && rows[0].totalMs === 0) {
+    const hint = document.createElement("li");
+    hint.className = "hint";
+    hint.textContent = "まだ学習時間の記録はありません。";
+    el.studyRecentList.appendChild(hint);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const row of rows) {
+    const li = document.createElement("li");
+    li.className = "study-recent-row";
+
+    const label = document.createElement("span");
+    label.className = "study-recent-label";
+    label.textContent = labelForDayKey(row.dayKey, now);
+
+    const value = document.createElement("span");
+    value.className = "study-recent-value";
+    value.textContent = formatDurationCompact(row.totalMs);
+
+    li.appendChild(label);
+    li.appendChild(value);
+    fragment.appendChild(li);
+  }
+
+  el.studyRecentList.appendChild(fragment);
+}
+
+function formatDurationClock(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatDurationCompact(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (hours > 0) {
+    return `${hours}時間${String(minutes).padStart(2, "0")}分`;
+  }
+  if (minutes > 0) {
+    return `${minutes}分`;
+  }
+  return totalSeconds > 0 ? `${totalSeconds}秒` : "0分";
+}
+
+function dayKeyFromTimestamp(timestamp) {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function startOfNextDayTimestamp(timestamp) {
+  const date = new Date(timestamp);
+  date.setHours(24, 0, 0, 0);
+  return date.getTime();
+}
+
+function offsetDayKey(offset, baseTimestamp = Date.now()) {
+  const date = new Date(baseTimestamp);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + offset);
+  return dayKeyFromTimestamp(date.getTime());
+}
+
+function labelForDayKey(dayKey, baseTimestamp = Date.now()) {
+  const today = dayKeyFromTimestamp(baseTimestamp);
+  const yesterday = offsetDayKey(-1, baseTimestamp);
+  if (dayKey === today) {
+    return "今日";
+  }
+  if (dayKey === yesterday) {
+    return "昨日";
+  }
+  const [year, month, day] = dayKey.split("-");
+  const shortYear = year ? year.slice(-2) : "";
+  return `${shortYear}/${month}/${day}`;
+}
+
 function toggleQueue(path) {
   const index = state.queue.indexOf(path);
   if (index >= 0) {
@@ -1149,6 +1636,7 @@ function toggleQueue(path) {
   saveJson(STORAGE_KEYS.queue, state.queue);
   renderItemList();
   renderQueue();
+  updateStudyPanel();
 }
 
 function removeFromQueue(path) {
@@ -1160,6 +1648,7 @@ function removeFromQueue(path) {
   saveJson(STORAGE_KEYS.queue, state.queue);
   renderItemList();
   renderQueue();
+  updateStudyPanel();
 }
 
 function toggleDone(path) {
@@ -1172,6 +1661,7 @@ function toggleDone(path) {
   saveJson(STORAGE_KEYS.doneByDate, state.doneByDate);
   renderItemList();
   renderQueue();
+  updateStudyPanel();
 }
 
 function clearTodayDone() {
@@ -1181,6 +1671,7 @@ function clearTodayDone() {
   saveJson(STORAGE_KEYS.doneByDate, state.doneByDate);
   renderItemList();
   renderQueue();
+  updateStudyPanel();
 }
 
 function pruneQueueAndDone() {
@@ -1196,6 +1687,7 @@ function pruneQueueAndDone() {
 
   saveJson(STORAGE_KEYS.queue, state.queue);
   saveJson(STORAGE_KEYS.doneByDate, state.doneByDate);
+  updateStudyPanel();
 }
 
 async function openItem(path) {
@@ -1204,6 +1696,11 @@ async function openItem(path) {
     setStatus("教材が見つかりません。再スキャンしてください。", "warn");
     return;
   }
+
+  const shouldRestartStudySession =
+    state.studySession.active &&
+    Boolean(state.studySession.path) &&
+    state.studySession.path !== path;
 
   if (state.currentPath && state.currentPath !== path) {
     saveCurrentMemo(false);
@@ -1216,6 +1713,10 @@ async function openItem(path) {
     const nativeEntry = state.nativeFileMap.get(path);
     if (nativeEntry && nativeEntry.url) {
       showNativeInViewer(item, nativeEntry.url);
+      if (shouldRestartStudySession) {
+        restartStudySessionForItem(item);
+      }
+      updateStudyPanel();
       setStatus(`${item.subject} / ${item.name}`);
       renderItemList();
       renderQueue();
@@ -1229,6 +1730,10 @@ async function openItem(path) {
     }
 
     showFileInViewer(item, file);
+    if (shouldRestartStudySession) {
+      restartStudySessionForItem(item);
+    }
+    updateStudyPanel();
     setStatus(`${item.subject} / ${item.name}`);
   } catch (error) {
     console.error(error);
@@ -1393,11 +1898,7 @@ function revokeObjectUrl() {
 }
 
 function todayKey() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const date = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${date}`;
+  return dayKeyFromTimestamp(Date.now());
 }
 
 function ensureTodayDoneMap() {

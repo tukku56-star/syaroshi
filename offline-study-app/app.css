@@ -157,6 +157,10 @@ button {
   background: var(--warm);
 }
 
+.action.is-recording {
+  background: var(--warm);
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(290px, 370px) minmax(0, 1fr);
@@ -405,6 +409,89 @@ textarea:focus {
   color: var(--muted);
 }
 
+.study-card {
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 0.85rem;
+  background: linear-gradient(145deg, #fff7ed, #ffffff);
+  display: grid;
+  gap: 0.7rem;
+}
+
+.study-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.study-box {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.68rem 0.72rem;
+  background: #fffffff2;
+}
+
+.study-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.study-value {
+  margin: 0.22rem 0 0;
+  font-size: 1.22rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.study-value-small {
+  font-size: 1rem;
+}
+
+.study-value.is-live {
+  color: var(--warm);
+}
+
+.study-target {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.study-actions {
+  align-items: center;
+}
+
+.study-recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.36rem;
+}
+
+.study-recent-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.42rem 0.58rem;
+  background: #fffffff2;
+  font-size: 0.8rem;
+}
+
+.study-recent-label {
+  color: var(--muted);
+}
+
+.study-recent-value {
+  font-weight: 700;
+}
+
 #pdfViewer {
   width: 100%;
   min-height: 58vh;
@@ -485,5 +572,21 @@ textarea:focus {
   .install-guide {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 720px) {
+  .study-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .study-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .study-actions .action,
+  .study-actions .tiny {
+    width: 100%;
   }
 }

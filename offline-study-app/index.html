@@ -94,6 +94,29 @@
         </section>
 
         <section class="panel viewer-panel">
+          <section class="study-card" aria-label="学習時間">
+            <div class="panel-title-row">
+              <h2>学習時間</h2>
+              <p id="studyTodayTotal" class="count">今日 00:00:00</p>
+            </div>
+            <div class="study-grid">
+              <div class="study-box">
+                <p class="study-label">現在の記録</p>
+                <p id="studySessionTime" class="study-value">00:00:00</p>
+              </div>
+              <div class="study-box">
+                <p class="study-label">この教材</p>
+                <p id="studyCurrentItemTotal" class="study-value study-value-small">00:00:00</p>
+              </div>
+            </div>
+            <p id="studyTarget" class="study-target">教材を開いてから記録開始できます。</p>
+            <div class="item-actions study-actions">
+              <button id="toggleStudyBtn" class="action" type="button">記録開始</button>
+              <button id="resetStudyTodayBtn" class="tiny" type="button">今日をリセット</button>
+            </div>
+            <ul id="studyRecentList" class="study-recent-list"></ul>
+          </section>
+
           <div id="viewerPlaceholder" class="placeholder">
             <h2>教材を選択してください</h2>
             <p>PDFは右側で閲覧、音声はそのまま再生できます。今日のキューに追加すると進捗管理しやすくなります。</p>
