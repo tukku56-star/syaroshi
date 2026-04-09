@@ -525,6 +525,95 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
+.study-weekly-panel {
+  margin-top: 0.05rem;
+}
+
+.study-week-axis {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.36rem;
+}
+
+.study-week-axis-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+.study-weekly-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.study-week-row {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.58rem 0.62rem;
+  background: #fff;
+  display: grid;
+  gap: 0.46rem;
+}
+
+.study-week-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  align-items: baseline;
+}
+
+.study-week-row-subject {
+  font-size: 0.84rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.study-week-row-total {
+  color: var(--muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.study-week-bars {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.36rem;
+  align-items: end;
+  min-height: 78px;
+}
+
+.study-week-bar-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 0.28rem;
+  justify-items: center;
+  align-items: end;
+}
+
+.study-week-bar {
+  width: 100%;
+  min-height: 6px;
+  height: max(6px, calc(var(--bar-scale, 0) * 72px));
+  border-radius: 999px 999px 4px 4px;
+  background: linear-gradient(180deg, #14b8a6, #0f766e);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.08);
+}
+
+.study-week-bar.is-empty {
+  background: rgba(30, 41, 51, 0.08);
+  box-shadow: none;
+}
+
+.study-week-bar-time {
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.1;
+  text-align: center;
+}
+
 #pdfViewer {
   width: 100%;
   min-height: 58vh;
@@ -615,6 +704,11 @@ textarea:focus {
 
   .study-breakdown {
     grid-template-columns: 1fr;
+  }
+
+  .study-week-axis,
+  .study-week-bars {
+    gap: 0.24rem;
   }
 
   .study-actions {

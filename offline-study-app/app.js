@@ -135,6 +135,9 @@ function cacheElements() {
   el.studySubjectTodayList = document.getElementById("studySubjectTodayList");
   el.studySubjectAllTimeCount = document.getElementById("studySubjectAllTimeCount");
   el.studySubjectAllTimeList = document.getElementById("studySubjectAllTimeList");
+  el.studyWeeklyRange = document.getElementById("studyWeeklyRange");
+  el.studyWeeklyAxis = document.getElementById("studyWeeklyAxis");
+  el.studyWeeklySubjectList = document.getElementById("studyWeeklySubjectList");
   el.memoInput = document.getElementById("memoInput");
   el.saveMemoBtn = document.getElementById("saveMemoBtn");
   el.folderInput = document.getElementById("folderInput");
@@ -1756,6 +1759,80 @@ function sortStudySubjectEntries(subjectMap) {
   });
 }
 
+function buildWeeklyStudySeries(now = Date.now()) {
+  const dayKeys = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    dayKeys.push(offsetDayKey(-i, now));
+  }
+
+  const dayIndex = new Map(dayKeys.map((dayKey, index) => [dayKey, index]));
+  const subjectSeries = new Map();
+
+  for (const [dayKey, row] of Object.entries(state.studyTimeByDate)) {
+    const index = dayIndex.get(dayKey);
+    if (index == null || !isPlainObject(row) || !isPlainObject(row.subjects)) {
+      continue;
+    }
+
+    for (const [subject, ms] of Object.entries(row.subjects)) {
+      const safeMs = normalizeDurationMs(ms);
+      if (safeMs <= 0) {
+        continue;
+      }
+      let values = subjectSeries.get(subject);
+      if (!values) {
+        values = new Array(dayKeys.length).fill(0);
+        subjectSeries.set(subject, values);
+      }
+      values[index] += safeMs;
+    }
+  }
+
+  if (state.studySession.active && state.studySession.subject) {
+    for (const chunk of getActiveStudyChunks(now)) {
+      const index = dayIndex.get(chunk.dayKey);
+      if (index == null) {
+        continue;
+      }
+      let values = subjectSeries.get(state.studySession.subject);
+      if (!values) {
+        values = new Array(dayKeys.length).fill(0);
+        subjectSeries.set(state.studySession.subject, values);
+      }
+      values[index] += chunk.ms;
+    }
+  }
+
+  const subjects = Array.from(subjectSeries.entries())
+    .map(([subject, values]) => ({
+      subject,
+      values,
+      totalMs: values.reduce((sum, value) => sum + value, 0)
+    }))
+    .sort((left, right) => {
+      const durationDiff = right.totalMs - left.totalMs;
+      if (durationDiff) {
+        return durationDiff;
+      }
+      return left.subject.localeCompare(right.subject, "ja");
+    });
+
+  let maxMs = 0;
+  for (const row of subjects) {
+    for (const value of row.values) {
+      if (value > maxMs) {
+        maxMs = value;
+      }
+    }
+  }
+
+  return {
+    dayKeys,
+    subjects,
+    maxMs
+  };
+}
+
 function recordStudyChunk(dayKey, session, ms) {
   const safeMs = normalizeDurationMs(ms);
   if (safeMs <= 0 || !session || !session.path || !session.subject) {
@@ -1990,6 +2067,7 @@ function updateStudyPanel(now = Date.now()) {
 
   renderStudyRecentList(now);
   renderStudySubjectBreakdown(now);
+  renderStudyWeeklyGraph(now);
 }
 
 function renderStudyRecentList(now = Date.now()) {
@@ -2088,6 +2166,91 @@ function renderStudySubjectList(listEl, countEl, entries, emptyMessage) {
   listEl.appendChild(fragment);
 }
 
+function renderStudyWeeklyGraph(now = Date.now()) {
+  if (!el.studyWeeklyAxis || !el.studyWeeklySubjectList || !el.studyWeeklyRange) {
+    return;
+  }
+
+  const series = buildWeeklyStudySeries(now);
+  renderStudyWeeklyAxis(series.dayKeys, now);
+  el.studyWeeklyRange.textContent = `${formatDayAxisLabel(series.dayKeys[0], now)} - ${formatDayAxisLabel(series.dayKeys[series.dayKeys.length - 1], now)}`;
+  el.studyWeeklySubjectList.textContent = "";
+
+  if (!series.subjects.length) {
+    const hint = document.createElement("li");
+    hint.className = "hint";
+    hint.textContent = "週間グラフに表示できる学習記録はまだありません。";
+    el.studyWeeklySubjectList.appendChild(hint);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const row of series.subjects) {
+    const li = document.createElement("li");
+    li.className = "study-week-row";
+
+    const head = document.createElement("div");
+    head.className = "study-week-row-head";
+
+    const subject = document.createElement("span");
+    subject.className = "study-week-row-subject";
+    subject.textContent = row.subject;
+
+    const total = document.createElement("span");
+    total.className = "study-week-row-total";
+    total.textContent = `直近7日 ${formatDurationCompact(row.totalMs)}`;
+
+    head.appendChild(subject);
+    head.appendChild(total);
+
+    const bars = document.createElement("div");
+    bars.className = "study-week-bars";
+
+    row.values.forEach((value, index) => {
+      const wrap = document.createElement("div");
+      wrap.className = "study-week-bar-wrap";
+
+      const bar = document.createElement("span");
+      bar.className = "study-week-bar";
+      if (value <= 0) {
+        bar.classList.add("is-empty");
+      }
+      bar.style.setProperty("--bar-scale", series.maxMs > 0 ? String(value / series.maxMs) : "0");
+      bar.title = `${row.subject} / ${formatDayAxisLabel(series.dayKeys[index], now)} / ${formatDurationCompact(value)}`;
+
+      const time = document.createElement("span");
+      time.className = "study-week-bar-time";
+      time.textContent = formatDurationVeryCompact(value);
+
+      wrap.appendChild(bar);
+      wrap.appendChild(time);
+      bars.appendChild(wrap);
+    });
+
+    li.appendChild(head);
+    li.appendChild(bars);
+    fragment.appendChild(li);
+  }
+
+  el.studyWeeklySubjectList.appendChild(fragment);
+}
+
+function renderStudyWeeklyAxis(dayKeys, now = Date.now()) {
+  if (!el.studyWeeklyAxis) {
+    return;
+  }
+
+  el.studyWeeklyAxis.textContent = "";
+  const fragment = document.createDocumentFragment();
+  for (const dayKey of dayKeys) {
+    const label = document.createElement("span");
+    label.className = "study-week-axis-label";
+    label.textContent = formatDayAxisLabel(dayKey, now);
+    fragment.appendChild(label);
+  }
+  el.studyWeeklyAxis.appendChild(fragment);
+}
+
 function formatDurationClock(ms) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -2107,6 +2270,19 @@ function formatDurationCompact(ms) {
     return `${minutes}分`;
   }
   return totalSeconds > 0 ? `${totalSeconds}秒` : "0分";
+}
+
+function formatDurationVeryCompact(ms) {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0) {
+    return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m`;
+  }
+  return ms > 0 ? "<1m" : "-";
 }
 
 function dayKeyFromTimestamp(timestamp) {
@@ -2142,6 +2318,19 @@ function labelForDayKey(dayKey, baseTimestamp = Date.now()) {
   const [year, month, day] = dayKey.split("-");
   const shortYear = year ? year.slice(-2) : "";
   return `${shortYear}/${month}/${day}`;
+}
+
+function formatDayAxisLabel(dayKey, baseTimestamp = Date.now()) {
+  const today = dayKeyFromTimestamp(baseTimestamp);
+  if (dayKey === today) {
+    return "今日";
+  }
+  const yesterday = offsetDayKey(-1, baseTimestamp);
+  if (dayKey === yesterday) {
+    return "昨日";
+  }
+  const [, month, day] = dayKey.split("-");
+  return `${Number(month)}/${Number(day)}`;
 }
 
 function toggleQueue(path) {
