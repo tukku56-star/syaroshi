@@ -500,6 +500,31 @@ textarea:focus {
   font-weight: 700;
 }
 
+.study-breakdown {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.study-breakdown-panel {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.72rem;
+  background: #fffffff2;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.study-breakdown-panel h3 {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.study-subject-name {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 #pdfViewer {
   width: 100%;
   min-height: 58vh;
@@ -585,6 +610,10 @@ textarea:focus {
 
 @media (max-width: 720px) {
   .study-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .study-breakdown {
     grid-template-columns: 1fr;
   }
 

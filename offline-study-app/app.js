@@ -131,6 +131,10 @@ function cacheElements() {
   el.toggleStudyBtn = document.getElementById("toggleStudyBtn");
   el.resetStudyTodayBtn = document.getElementById("resetStudyTodayBtn");
   el.studyRecentList = document.getElementById("studyRecentList");
+  el.studySubjectTodayCount = document.getElementById("studySubjectTodayCount");
+  el.studySubjectTodayList = document.getElementById("studySubjectTodayList");
+  el.studySubjectAllTimeCount = document.getElementById("studySubjectAllTimeCount");
+  el.studySubjectAllTimeList = document.getElementById("studySubjectAllTimeList");
   el.memoInput = document.getElementById("memoInput");
   el.saveMemoBtn = document.getElementById("saveMemoBtn");
   el.folderInput = document.getElementById("folderInput");
@@ -1689,6 +1693,69 @@ function getStudyTotalMsForDay(dayKey, now = Date.now()) {
   return totalMs;
 }
 
+function buildStudySubjectLookupForDay(dayKey, now = Date.now()) {
+  const output = new Map();
+  const record = state.studyTimeByDate[dayKey];
+  if (record && isPlainObject(record.subjects)) {
+    for (const [subject, ms] of Object.entries(record.subjects)) {
+      const safeMs = normalizeDurationMs(ms);
+      if (safeMs > 0) {
+        output.set(subject, safeMs);
+      }
+    }
+  }
+
+  if (state.studySession.active && state.studySession.subject) {
+    for (const chunk of getActiveStudyChunks(now)) {
+      if (chunk.dayKey !== dayKey) {
+        continue;
+      }
+      output.set(
+        state.studySession.subject,
+        (output.get(state.studySession.subject) || 0) + chunk.ms
+      );
+    }
+  }
+
+  return output;
+}
+
+function buildStudySubjectLookupAllTime(now = Date.now()) {
+  const output = new Map();
+
+  for (const row of Object.values(state.studyTimeByDate)) {
+    if (!isPlainObject(row) || !isPlainObject(row.subjects)) {
+      continue;
+    }
+    for (const [subject, ms] of Object.entries(row.subjects)) {
+      const safeMs = normalizeDurationMs(ms);
+      if (safeMs <= 0) {
+        continue;
+      }
+      output.set(subject, (output.get(subject) || 0) + safeMs);
+    }
+  }
+
+  if (state.studySession.active && state.studySession.subject) {
+    output.set(
+      state.studySession.subject,
+      (output.get(state.studySession.subject) || 0) + getStudySessionElapsedMs(now)
+    );
+  }
+
+  return output;
+}
+
+function sortStudySubjectEntries(subjectMap) {
+  return Array.from(subjectMap.entries()).sort((left, right) => {
+    const durationDiff = right[1] - left[1];
+    if (durationDiff) {
+      return durationDiff;
+    }
+    return left[0].localeCompare(right[0], "ja");
+  });
+}
+
 function recordStudyChunk(dayKey, session, ms) {
   const safeMs = normalizeDurationMs(ms);
   if (safeMs <= 0 || !session || !session.path || !session.subject) {
@@ -1922,6 +1989,7 @@ function updateStudyPanel(now = Date.now()) {
   }
 
   renderStudyRecentList(now);
+  renderStudySubjectBreakdown(now);
 }
 
 function renderStudyRecentList(now = Date.now()) {
@@ -1966,6 +2034,58 @@ function renderStudyRecentList(now = Date.now()) {
   }
 
   el.studyRecentList.appendChild(fragment);
+}
+
+function renderStudySubjectBreakdown(now = Date.now()) {
+  renderStudySubjectList(
+    el.studySubjectTodayList,
+    el.studySubjectTodayCount,
+    sortStudySubjectEntries(buildStudySubjectLookupForDay(todayKey(), now)),
+    "今日はまだ科目別の記録がありません。"
+  );
+  renderStudySubjectList(
+    el.studySubjectAllTimeList,
+    el.studySubjectAllTimeCount,
+    sortStudySubjectEntries(buildStudySubjectLookupAllTime(now)),
+    "累計の科目別記録はまだありません。"
+  );
+}
+
+function renderStudySubjectList(listEl, countEl, entries, emptyMessage) {
+  if (!listEl || !countEl) {
+    return;
+  }
+
+  listEl.textContent = "";
+  countEl.textContent = `${entries.length}科目`;
+
+  if (!entries.length) {
+    const hint = document.createElement("li");
+    hint.className = "hint";
+    hint.textContent = emptyMessage;
+    listEl.appendChild(hint);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const [subject, ms] of entries) {
+    const li = document.createElement("li");
+    li.className = "study-recent-row";
+
+    const label = document.createElement("span");
+    label.className = "study-recent-label study-subject-name";
+    label.textContent = subject;
+
+    const value = document.createElement("span");
+    value.className = "study-recent-value";
+    value.textContent = formatDurationCompact(ms);
+
+    li.appendChild(label);
+    li.appendChild(value);
+    fragment.appendChild(li);
+  }
+
+  listEl.appendChild(fragment);
 }
 
 function formatDurationClock(ms) {

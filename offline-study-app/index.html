@@ -115,6 +115,22 @@
               <button id="resetStudyTodayBtn" class="tiny" type="button">今日をリセット</button>
             </div>
             <ul id="studyRecentList" class="study-recent-list"></ul>
+            <div class="study-breakdown">
+              <section class="study-breakdown-panel" aria-label="今日の科目別学習時間">
+                <div class="panel-title-row">
+                  <h3>今日の科目別</h3>
+                  <p id="studySubjectTodayCount" class="count">0科目</p>
+                </div>
+                <ul id="studySubjectTodayList" class="study-recent-list"></ul>
+              </section>
+              <section class="study-breakdown-panel" aria-label="累計の科目別学習時間">
+                <div class="panel-title-row">
+                  <h3>累計の科目別</h3>
+                  <p id="studySubjectAllTimeCount" class="count">0科目</p>
+                </div>
+                <ul id="studySubjectAllTimeList" class="study-recent-list"></ul>
+              </section>
+            </div>
           </section>
 
           <section class="study-card usage-card" aria-label="アプリ利用時間">
