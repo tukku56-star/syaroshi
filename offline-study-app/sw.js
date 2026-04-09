@@ -1,4 +1,4 @@
-const CACHE_NAME = "sharoushi-offline-shell-v15";
+const CACHE_NAME = "sharoushi-offline-shell-v16";
 const APP_SHELL = [
   "./",
   "./index.html",

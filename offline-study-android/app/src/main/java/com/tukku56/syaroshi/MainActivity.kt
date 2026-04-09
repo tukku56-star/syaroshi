@@ -37,6 +37,7 @@ import java.util.zip.ZipInputStream
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var isAppInForeground = false
     private val nativeFileMap = mutableMapOf<String, Uri>()
     private val nativeFileLock = Any()
     private val pdfLaunchLock = Any()
@@ -131,6 +132,18 @@ class MainActivity : AppCompatActivity() {
         maybeImportZipFromIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        isAppInForeground = true
+        dispatchAndroidAppState(true)
+    }
+
+    override fun onPause() {
+        dispatchAndroidAppState(false)
+        isAppInForeground = false
+        super.onPause()
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         webView.saveState(outState)
         super.onSaveInstanceState(outState)
@@ -171,6 +184,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 dispatchCachedPayloadIfAvailable()
+                dispatchAndroidAppState(isAppInForeground)
             }
         }
 
@@ -1166,6 +1180,22 @@ class MainActivity : AppCompatActivity() {
         }
         restoredPayloadDispatched = true
         dispatchNativeFolderPayload(payload)
+    }
+
+    private fun dispatchAndroidAppState(isForeground: Boolean) {
+        if (!::webView.isInitialized) {
+            return
+        }
+        val jsValue = if (isForeground) "true" else "false"
+        val script =
+            "(function(){" +
+                "if (typeof window.__onAndroidAppStateChanged === 'function') {" +
+                "window.__onAndroidAppStateChanged($jsValue);" +
+                "return 'ok';" +
+                "}" +
+                "return 'missing';" +
+                "})();"
+        webView.evaluateJavascript(script, null)
     }
 
     private fun interceptNativeFileRequest(url: Uri): WebResourceResponse? {

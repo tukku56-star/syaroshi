@@ -5,6 +5,8 @@ const STORAGE_KEYS = {
   queue: "sharoushi.offline.queue",
   doneByDate: "sharoushi.offline.doneByDate",
   memos: "sharoushi.offline.memos",
+  appUsageByDate: "sharoushi.offline.appUsageByDate",
+  appUsageSession: "sharoushi.offline.appUsageSession",
   studyTimeByDate: "sharoushi.offline.studyTimeByDate",
   studySession: "sharoushi.offline.studySession",
   selectedType: "sharoushi.offline.selectedType",
@@ -26,6 +28,8 @@ const MAX_RENDER_ITEMS = 350;
 const VIEWER_PLACEHOLDER_DEFAULT_TITLE = "教材を選択してください";
 const VIEWER_PLACEHOLDER_DEFAULT_TEXT = "PDFは右側で閲覧、音声はそのまま再生できます。今日のキューに追加すると進捗管理しやすくなります。";
 const STUDY_TICK_MS = 1000;
+const SESSION_HEARTBEAT_MS = 5000;
+const SESSION_RESUME_GRACE_MS = 15000;
 
 const state = {
   library: [],
@@ -36,6 +40,8 @@ const state = {
   queue: [],
   doneByDate: {},
   memos: {},
+  appUsageByDate: {},
+  appUsageSession: createEmptyAppUsageSession(),
   studyTimeByDate: {},
   studySession: createEmptyStudySession(),
   selectedType: "all",
@@ -48,7 +54,8 @@ const state = {
   currentObjectUrl: null,
   deferredPrompt: null,
   scanning: false,
-  installGuideDismissed: false
+  installGuideDismissed: false,
+  androidAppForeground: true
 };
 
 let pendingNativeFolderResolve = null;
@@ -60,15 +67,18 @@ const el = {};
 
 document.addEventListener("DOMContentLoaded", init);
 window.__onNativeFolderPicked = onNativeFolderPicked;
+window.__onAndroidAppStateChanged = onAndroidAppStateChanged;
 
 async function init() {
   cacheElements();
   bindEvents();
   hydrateState();
+  syncAppUsageTracking();
   applyFilters();
   renderQueue();
   updateMemoAvailability();
   updateStudyPanel();
+  updateAppUsagePanel();
   syncStudyTicker();
 
   const nativeFolderSupported = supportsNativeFolderPicker();
@@ -110,6 +120,10 @@ function cacheElements() {
   el.audioWrap = document.getElementById("audioWrap");
   el.audioTitle = document.getElementById("audioTitle");
   el.audioPlayer = document.getElementById("audioPlayer");
+  el.appUsageTodayTotal = document.getElementById("appUsageTodayTotal");
+  el.appUsageSessionTime = document.getElementById("appUsageSessionTime");
+  el.appUsageState = document.getElementById("appUsageState");
+  el.appUsageRecentList = document.getElementById("appUsageRecentList");
   el.studyTodayTotal = document.getElementById("studyTodayTotal");
   el.studySessionTime = document.getElementById("studySessionTime");
   el.studyCurrentItemTotal = document.getElementById("studyCurrentItemTotal");
@@ -150,7 +164,12 @@ function bindEvents() {
   el.fileInput.addEventListener("change", onFilesChosen);
   el.installBtn.addEventListener("click", installPwa);
   el.dismissInstallGuideBtn.addEventListener("click", dismissInstallGuide);
-  window.addEventListener("beforeunload", revokeObjectUrl);
+  document.addEventListener("visibilitychange", handleAppVisibilityChange);
+  window.addEventListener("focus", handleAppVisibilityChange);
+  window.addEventListener("blur", handleAppVisibilityChange);
+  window.addEventListener("pageshow", handleAppVisibilityChange);
+  window.addEventListener("pagehide", handlePageHide);
+  window.addEventListener("beforeunload", handleBeforeUnload);
 
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
@@ -188,6 +207,8 @@ function hydrateState() {
     state.memos = {};
   }
 
+  state.appUsageByDate = normalizeAppUsageByDate(loadJson(STORAGE_KEYS.appUsageByDate, {}));
+  state.appUsageSession = normalizeAppUsageSession(loadJson(STORAGE_KEYS.appUsageSession, createEmptyAppUsageSession()));
   state.studyTimeByDate = normalizeStudyTimeByDate(loadJson(STORAGE_KEYS.studyTimeByDate, {}));
   state.studySession = normalizeStudySession(loadJson(STORAGE_KEYS.studySession, createEmptyStudySession()));
 
@@ -218,6 +239,8 @@ function hydrateState() {
     state.studySession = createEmptyStudySession();
     saveJson(STORAGE_KEYS.studySession, state.studySession);
   }
+  reviveStoredAppUsageSession();
+  reviveStoredStudySession();
 
   el.typeFilter.value = state.selectedType;
   if (el.materialFilter) {
@@ -1182,13 +1205,312 @@ function createSmallButton(label, action, path) {
   return button;
 }
 
+function createEmptyAppUsageSession() {
+  return {
+    active: false,
+    startedAt: 0,
+    lastHeartbeatAt: 0
+  };
+}
+
+function normalizeAppUsageByDate(raw) {
+  if (!isPlainObject(raw)) {
+    return {};
+  }
+
+  const output = {};
+  for (const [dayKey, row] of Object.entries(raw)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) {
+      continue;
+    }
+    if (isPlainObject(row)) {
+      output[dayKey] = {
+        totalMs: normalizeDurationMs(row.totalMs)
+      };
+      continue;
+    }
+    output[dayKey] = {
+      totalMs: normalizeDurationMs(row)
+    };
+  }
+
+  return output;
+}
+
+function normalizeAppUsageSession(raw) {
+  if (!isPlainObject(raw)) {
+    return createEmptyAppUsageSession();
+  }
+
+  const active = raw.active === true;
+  const startedAt = Number.isFinite(raw.startedAt) ? Math.max(0, Math.floor(raw.startedAt)) : 0;
+  const lastHeartbeatAt = Number.isFinite(raw.lastHeartbeatAt)
+    ? Math.max(0, Math.floor(raw.lastHeartbeatAt))
+    : startedAt;
+
+  if (!active || startedAt <= 0) {
+    return createEmptyAppUsageSession();
+  }
+
+  return {
+    active: true,
+    startedAt,
+    lastHeartbeatAt: Math.max(startedAt, lastHeartbeatAt)
+  };
+}
+
+function ensureAppUsageDayRecord(dayKey) {
+  if (!isPlainObject(state.appUsageByDate[dayKey])) {
+    state.appUsageByDate[dayKey] = {
+      totalMs: 0
+    };
+  }
+  const record = state.appUsageByDate[dayKey];
+  record.totalMs = normalizeDurationMs(record.totalMs);
+  return record;
+}
+
+function getActiveAppUsageChunks(now = Date.now()) {
+  if (!state.appUsageSession.active || !state.appUsageSession.startedAt) {
+    return [];
+  }
+  return splitStudySpanByDay(state.appUsageSession.startedAt, now);
+}
+
+function getAppUsageSessionElapsedMs(now = Date.now()) {
+  if (!state.appUsageSession.active || !state.appUsageSession.startedAt) {
+    return 0;
+  }
+  return Math.max(0, now - state.appUsageSession.startedAt);
+}
+
+function getAppUsageTotalMsForDay(dayKey, now = Date.now()) {
+  const record = state.appUsageByDate[dayKey];
+  let totalMs = record ? normalizeDurationMs(record.totalMs) : 0;
+
+  if (state.appUsageSession.active) {
+    for (const chunk of getActiveAppUsageChunks(now)) {
+      if (chunk.dayKey === dayKey) {
+        totalMs += chunk.ms;
+      }
+    }
+  }
+
+  return totalMs;
+}
+
+function recordAppUsageChunk(dayKey, ms) {
+  const safeMs = normalizeDurationMs(ms);
+  if (safeMs <= 0) {
+    return;
+  }
+
+  const record = ensureAppUsageDayRecord(dayKey);
+  record.totalMs += safeMs;
+}
+
+function commitAppUsageSession(endedAt = Date.now()) {
+  const session = state.appUsageSession;
+  if (!session.active || !session.startedAt) {
+    return 0;
+  }
+
+  const chunks = splitStudySpanByDay(session.startedAt, endedAt);
+  let savedMs = 0;
+  for (const chunk of chunks) {
+    recordAppUsageChunk(chunk.dayKey, chunk.ms);
+    savedMs += chunk.ms;
+  }
+  saveJson(STORAGE_KEYS.appUsageByDate, state.appUsageByDate);
+  return savedMs;
+}
+
+function startAppUsageSession(startedAt = Date.now()) {
+  const safeStartedAt = normalizeDurationMs(startedAt) || Date.now();
+  state.appUsageSession = {
+    active: true,
+    startedAt: safeStartedAt,
+    lastHeartbeatAt: safeStartedAt
+  };
+  saveJson(STORAGE_KEYS.appUsageSession, state.appUsageSession);
+  syncStudyTicker();
+  updateAppUsagePanel();
+}
+
+function clearAppUsageSession() {
+  state.appUsageSession = createEmptyAppUsageSession();
+  saveJson(STORAGE_KEYS.appUsageSession, state.appUsageSession);
+  syncStudyTicker();
+}
+
+function touchAppUsageSession(now = Date.now(), force) {
+  if (!state.appUsageSession.active) {
+    return;
+  }
+
+  const safeNow = normalizeDurationMs(now) || Date.now();
+  const lastHeartbeatAt = normalizeDurationMs(
+    state.appUsageSession.lastHeartbeatAt || state.appUsageSession.startedAt
+  );
+  if (!force && safeNow - lastHeartbeatAt < SESSION_HEARTBEAT_MS) {
+    return;
+  }
+
+  state.appUsageSession.lastHeartbeatAt = safeNow;
+  saveJson(STORAGE_KEYS.appUsageSession, state.appUsageSession);
+}
+
+function reviveStoredAppUsageSession() {
+  if (!state.appUsageSession.active || !state.appUsageSession.startedAt) {
+    return;
+  }
+
+  const lastHeartbeatAt = normalizeDurationMs(
+    state.appUsageSession.lastHeartbeatAt || state.appUsageSession.startedAt
+  );
+  if (lastHeartbeatAt < state.appUsageSession.startedAt) {
+    clearAppUsageSession();
+    return;
+  }
+
+  commitAppUsageSession(lastHeartbeatAt);
+  clearAppUsageSession();
+}
+
+function updateAppUsagePanel(now = Date.now()) {
+  if (!el.appUsageTodayTotal || !el.appUsageSessionTime || !el.appUsageState || !el.appUsageRecentList) {
+    return;
+  }
+
+  const todayTotalMs = getAppUsageTotalMsForDay(todayKey(), now);
+  el.appUsageTodayTotal.textContent = `今日 ${formatDurationClock(todayTotalMs)}`;
+  el.appUsageSessionTime.textContent = formatDurationClock(getAppUsageSessionElapsedMs(now));
+  el.appUsageSessionTime.classList.toggle("is-live", state.appUsageSession.active);
+
+  if (state.appUsageSession.active) {
+    el.appUsageState.textContent = "前面で開いている時間を自動記録中です。";
+  } else if (isAppUsageTrackableNow()) {
+    el.appUsageState.textContent = "アプリを前面で開いている時間を自動で記録します。";
+  } else {
+    el.appUsageState.textContent = "バックグラウンド中や別画面表示中は自動停止します。";
+  }
+
+  renderAppUsageRecentList(now);
+}
+
+function renderAppUsageRecentList(now = Date.now()) {
+  if (!el.appUsageRecentList) {
+    return;
+  }
+
+  el.appUsageRecentList.textContent = "";
+  const rows = [];
+  for (let i = 0; i < 7; i += 1) {
+    const dayKey = offsetDayKey(-i, now);
+    const totalMs = getAppUsageTotalMsForDay(dayKey, now);
+    if (i === 0 || totalMs > 0) {
+      rows.push({ dayKey, totalMs });
+    }
+  }
+
+  if (rows.length === 1 && rows[0].totalMs === 0) {
+    const hint = document.createElement("li");
+    hint.className = "hint";
+    hint.textContent = "まだアプリ利用時間の記録はありません。";
+    el.appUsageRecentList.appendChild(hint);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const row of rows) {
+    const li = document.createElement("li");
+    li.className = "study-recent-row";
+
+    const label = document.createElement("span");
+    label.className = "study-recent-label";
+    label.textContent = labelForDayKey(row.dayKey, now);
+
+    const value = document.createElement("span");
+    value.className = "study-recent-value";
+    value.textContent = formatDurationCompact(row.totalMs);
+
+    li.appendChild(label);
+    li.appendChild(value);
+    fragment.appendChild(li);
+  }
+
+  el.appUsageRecentList.appendChild(fragment);
+}
+
+function isAppUsageTrackableNow() {
+  const isVisible = typeof document.visibilityState !== "string" || document.visibilityState === "visible";
+  return isVisible && state.androidAppForeground !== false;
+}
+
+function syncAppUsageTracking(now = Date.now()) {
+  const safeNow = normalizeDurationMs(now) || Date.now();
+  const shouldTrack = isAppUsageTrackableNow();
+
+  if (!shouldTrack) {
+    if (state.appUsageSession.active) {
+      commitAppUsageSession(safeNow);
+      clearAppUsageSession();
+    }
+    updateAppUsagePanel(safeNow);
+    return;
+  }
+
+  if (!state.appUsageSession.active) {
+    startAppUsageSession(safeNow);
+    return;
+  }
+
+  touchAppUsageSession(safeNow);
+  updateAppUsagePanel(safeNow);
+}
+
+function handleAppVisibilityChange() {
+  const now = Date.now();
+  if (isAppUsageTrackableNow()) {
+    reconcileActiveStudySessionGap(now);
+  } else {
+    touchStudySession(now, true);
+  }
+  syncAppUsageTracking(now);
+  updateStudyPanel(now);
+}
+
+function handlePageHide() {
+  const now = Date.now();
+  touchStudySession(now, true);
+  if (state.appUsageSession.active) {
+    commitAppUsageSession(now);
+    clearAppUsageSession();
+  }
+}
+
+function handleBeforeUnload() {
+  handlePageHide();
+  revokeObjectUrl();
+}
+
+function onAndroidAppStateChanged(rawValue) {
+  state.androidAppForeground =
+    rawValue === true ||
+    rawValue === "true" ||
+    rawValue === 1 ||
+    rawValue === "1";
+  handleAppVisibilityChange();
+}
+
 function createEmptyStudySession() {
   return {
     active: false,
     path: "",
     subject: "",
     name: "",
-    startedAt: 0
+    startedAt: 0,
+    lastHeartbeatAt: 0
   };
 }
 
@@ -1244,6 +1566,9 @@ function normalizeStudySession(raw) {
   const subject = String(raw.subject || "").trim();
   const name = String(raw.name || "").trim();
   const startedAt = Number.isFinite(raw.startedAt) ? Math.max(0, Math.floor(raw.startedAt)) : 0;
+  const lastHeartbeatAt = Number.isFinite(raw.lastHeartbeatAt)
+    ? Math.max(0, Math.floor(raw.lastHeartbeatAt))
+    : startedAt;
 
   if (!active || !path || !subject || !name || startedAt <= 0) {
     return createEmptyStudySession();
@@ -1254,7 +1579,8 @@ function normalizeStudySession(raw) {
     path,
     subject,
     name,
-    startedAt
+    startedAt,
+    lastHeartbeatAt: Math.max(startedAt, lastHeartbeatAt)
   };
 }
 
@@ -1391,17 +1717,80 @@ function commitStudySession(endedAt = Date.now()) {
   return savedMs;
 }
 
+function touchStudySession(now = Date.now(), force) {
+  if (!state.studySession.active) {
+    return;
+  }
+
+  const safeNow = normalizeDurationMs(now) || Date.now();
+  const lastHeartbeatAt = normalizeDurationMs(
+    state.studySession.lastHeartbeatAt || state.studySession.startedAt
+  );
+  if (!force && safeNow - lastHeartbeatAt < SESSION_HEARTBEAT_MS) {
+    return;
+  }
+
+  state.studySession.lastHeartbeatAt = safeNow;
+  saveJson(STORAGE_KEYS.studySession, state.studySession);
+}
+
+function reviveStoredStudySession() {
+  if (!state.studySession.active || !state.studySession.startedAt) {
+    return;
+  }
+
+  const lastHeartbeatAt = normalizeDurationMs(
+    state.studySession.lastHeartbeatAt || state.studySession.startedAt
+  );
+  if (lastHeartbeatAt < state.studySession.startedAt) {
+    clearStudySession();
+    return;
+  }
+
+  commitStudySession(lastHeartbeatAt);
+  clearStudySession();
+}
+
+function reconcileActiveStudySessionGap(now = Date.now()) {
+  if (!state.studySession.active || !state.studySession.startedAt) {
+    return;
+  }
+
+  const safeNow = normalizeDurationMs(now) || Date.now();
+  const lastHeartbeatAt = normalizeDurationMs(
+    state.studySession.lastHeartbeatAt || state.studySession.startedAt
+  );
+  if (lastHeartbeatAt < state.studySession.startedAt) {
+    state.studySession.lastHeartbeatAt = safeNow;
+    saveJson(STORAGE_KEYS.studySession, state.studySession);
+    return;
+  }
+  if (safeNow - lastHeartbeatAt <= SESSION_RESUME_GRACE_MS) {
+    touchStudySession(safeNow);
+    return;
+  }
+
+  commitStudySession(lastHeartbeatAt);
+  state.studySession.startedAt = safeNow;
+  state.studySession.lastHeartbeatAt = safeNow;
+  saveJson(STORAGE_KEYS.studySession, state.studySession);
+  renderItemList();
+  renderQueue();
+}
+
 function startStudySessionForItem(item, startedAt = Date.now()) {
   if (!item) {
     return;
   }
 
+  const safeStartedAt = normalizeDurationMs(startedAt) || Date.now();
   state.studySession = {
     active: true,
     path: item.path,
     subject: item.subject,
     name: item.name,
-    startedAt: normalizeDurationMs(startedAt) || Date.now()
+    startedAt: safeStartedAt,
+    lastHeartbeatAt: safeStartedAt
   };
   saveJson(STORAGE_KEYS.studySession, state.studySession);
   syncStudyTicker();
@@ -1458,6 +1847,7 @@ function resetTodayStudyTime() {
 
   if (state.studySession.active) {
     state.studySession.startedAt = Date.now();
+    state.studySession.lastHeartbeatAt = state.studySession.startedAt;
     saveJson(STORAGE_KEYS.studySession, state.studySession);
   }
 
@@ -1474,23 +1864,31 @@ function syncStudyTicker() {
     studyTickTimer = 0;
   }
 
-  if (!state.studySession.active) {
+  if (!state.studySession.active && !state.appUsageSession.active) {
     updateStudyPanel();
+    updateAppUsagePanel();
     return;
   }
 
   studyTickTimer = window.setInterval(() => {
-    updateStudyPanel();
+    const now = Date.now();
+    if (isAppUsageTrackableNow()) {
+      reconcileActiveStudySessionGap(now);
+      touchStudySession(now);
+    }
+    touchAppUsageSession(now);
+    updateStudyPanel(now);
+    updateAppUsagePanel(now);
   }, STUDY_TICK_MS);
   updateStudyPanel();
+  updateAppUsagePanel();
 }
 
-function updateStudyPanel() {
+function updateStudyPanel(now = Date.now()) {
   if (!el.studyTodayTotal || !el.studySessionTime || !el.studyCurrentItemTotal || !el.studyTarget) {
     return;
   }
 
-  const now = Date.now();
   const today = todayKey();
   const currentItem = state.currentPath ? state.libraryMap.get(state.currentPath) : null;
   const sessionItem = state.studySession.active && state.studySession.path

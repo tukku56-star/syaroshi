@@ -419,6 +419,14 @@ textarea:focus {
   gap: 0.7rem;
 }
 
+.usage-card {
+  background: linear-gradient(145deg, #effcf7, #ffffff);
+}
+
+.usage-card .study-value.is-live {
+  color: var(--accent);
+}
+
 .study-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
